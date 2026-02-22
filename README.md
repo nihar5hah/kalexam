@@ -1,3 +1,81 @@
+## KalExam Phase 1
+
+KalExam Phase 1 ships a full flow:
+
+- Landing page at `/`
+- Upload page at `/upload`
+- Strategy report page at `/strategy`
+- API route at `/api/generate-strategy`
+
+AI provider architecture is abstracted in `src/lib/ai` with:
+
+- Gemini (default)
+- Custom OpenAI-compatible provider (OpenRouter/Kilo Gateway/base URL)
+
+Auth + persistence architecture:
+
+- Firebase Authentication (Google sign in / sign up)
+- Firestore per-user strategy storage (`users/{uid}/strategies/{strategyId}`)
+- Firebase Storage for uploaded files
+
+## Environment variables
+
+Create a `.env.local` file in `frontend/`:
+
+```bash
+# Firebase client SDK (required)
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
+NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=
+
+# Gemini (required for real AI output)
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.1-pro-preview
+```
+
+If provider calls fail or are not configured, the API route returns a mock strategy response for Phase 1.
+
+## Firebase console setup (required)
+
+1. Enable **Authentication** → Sign-in method → **Google**.
+2. Enable **Firestore Database** (production mode).
+3. Enable **Storage**.
+4. Add your app domain(s) in Firebase Auth authorized domains.
+
+## Recommended security rules
+
+Firestore rules:
+
+```txt
+rules_version = '2';
+service cloud.firestore {
+	match /databases/{database}/documents {
+		match /users/{userId}/strategies/{strategyId} {
+			allow read, write: if request.auth != null && request.auth.uid == userId;
+		}
+	}
+}
+```
+
+Storage rules:
+
+```txt
+rules_version = '2';
+service firebase.storage {
+	match /b/{bucket}/o {
+		match /users/{userId}/{allPaths=**} {
+			allow read, write: if request.auth != null && request.auth.uid == userId;
+		}
+	}
+}
+```
+
+---
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started

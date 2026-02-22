@@ -1,0 +1,106 @@
+"use client";
+
+import Link from "next/link";
+import { useState } from "react";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+export type DashboardSessionCard = {
+  id: string;
+  strategyId: string;
+  subjectName: string;
+  createdAtLabel: string;
+  chaptersCount: number;
+  progressPercent: number;
+  estimatedTotalStudyTime: string;
+  canManage: boolean;
+};
+
+export function StrategyList({
+  items,
+  onRename,
+  onDelete,
+}: {
+  items: DashboardSessionCard[];
+  onRename: (sessionId: string, subjectName: string) => Promise<void>;
+  onDelete: (sessionId: string) => Promise<void>;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  return (
+    <div className="space-y-4">
+      {items.map((item) => (
+        <Card key={item.id} className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl">
+          <CardHeader className="space-y-2">
+            <CardTitle className="text-white text-xl">{item.subjectName}</CardTitle>
+            <p className="text-sm text-neutral-400">Created: {item.createdAtLabel}</p>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+              <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-neutral-200">
+                Chapters: {item.chaptersCount}
+              </div>
+              <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-neutral-200">
+                Progress: {item.progressPercent}%
+              </div>
+              <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-neutral-200">
+                Study time: {item.estimatedTotalStudyTime}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button asChild className="rounded-full bg-white text-black hover:bg-neutral-200">
+                <Link href={`/strategy?id=${item.strategyId}`}>Resume Study</Link>
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                className="rounded-full border-white/10 bg-white/5 text-white hover:bg-white/10"
+                disabled={busyId === item.id || !item.canManage}
+                onClick={async () => {
+                  const nextName = window.prompt("Rename subject", item.subjectName)?.trim();
+                  if (!nextName || nextName === item.subjectName) {
+                    return;
+                  }
+
+                  setBusyId(item.id);
+                  try {
+                    await onRename(item.id, nextName);
+                  } finally {
+                    setBusyId(null);
+                  }
+                }}
+              >
+                Rename
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                className="rounded-full border-red-300/30 bg-red-500/10 text-red-200 hover:bg-red-500/20"
+                disabled={busyId === item.id || !item.canManage}
+                onClick={async () => {
+                  const confirmed = window.confirm("Move this study session to deleted items?");
+                  if (!confirmed) {
+                    return;
+                  }
+
+                  setBusyId(item.id);
+                  try {
+                    await onDelete(item.id);
+                  } finally {
+                    setBusyId(null);
+                  }
+                }}
+              >
+                Delete
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
