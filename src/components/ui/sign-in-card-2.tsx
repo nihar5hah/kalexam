@@ -3,9 +3,10 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 import { AnimatePresence, motion, useMotionValue, useTransform } from 'framer-motion';
-import { ArrowRight, Eye, EyeClosed, Globe, Lock, Mail, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Eye, EyeClosed, Globe, Lock, Mail } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
+import { KalExamLogo } from '@/components/KalExamLogo';
 
 function Input({ className, type, ...props }: React.ComponentProps<'input'>) {
   return (
@@ -80,8 +81,14 @@ export function SignInCard2({
 
   return (
     <div className="min-h-screen w-screen bg-[#050505] relative overflow-hidden flex items-center justify-center text-white">
-      <div className="absolute inset-0 bg-gradient-to-b from-indigo-500/30 via-violet-700/40 to-black pointer-events-none" />
-
+      {/* Back to home */}
+      <Link
+        href="/"
+        className="absolute top-5 left-5 z-20 flex items-center gap-1.5 text-white/40 hover:text-white/80 transition-colors duration-200 text-sm group"
+      >
+        <ArrowLeft className="w-3.5 h-3.5 transition-transform duration-200 group-hover:-translate-x-0.5" />
+        <span>Home</span>
+      </Link>
       <div
         className="absolute inset-0 opacity-[0.03] mix-blend-soft-light pointer-events-none"
         style={{
@@ -91,11 +98,17 @@ export function SignInCard2({
         }}
       />
 
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[120vh] h-[60vh] rounded-b-[50%] bg-indigo-400/15 blur-[80px] pointer-events-none" />
+      {/* Orange warm glow — top-center */}
       <motion.div
-        className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[90vh] h-[90vh] rounded-t-full bg-violet-400/20 blur-[60px] pointer-events-none"
-        animate={{ opacity: [0.3, 0.5, 0.3], scale: [1, 1.1, 1] }}
-        transition={{ duration: 6, repeat: Infinity, repeatType: 'mirror', delay: 1 }}
+        className="absolute top-0 left-1/2 -translate-x-1/2 w-[100vh] h-[55vh] rounded-b-[50%] bg-orange-500/[0.09] blur-[90px] pointer-events-none"
+        animate={{ opacity: [0.6, 1, 0.6], scale: [1, 1.08, 1] }}
+        transition={{ duration: 8, repeat: Infinity, repeatType: 'mirror' }}
+      />
+      {/* Amber glow — bottom */}
+      <motion.div
+        className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[80vh] h-[80vh] rounded-t-full bg-amber-500/[0.07] blur-[80px] pointer-events-none"
+        animate={{ opacity: [0.4, 0.7, 0.4], scale: [1, 1.12, 1] }}
+        transition={{ duration: 7, repeat: Infinity, repeatType: 'mirror', delay: 1.5 }}
       />
 
       <motion.div
@@ -138,13 +151,12 @@ export function SignInCard2({
 
               <div className="text-center space-y-1 mb-5 relative z-10">
                 <motion.div
-                  initial={{ scale: 0.5, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  transition={{ type: 'spring', duration: 0.8 }}
-                  className="mx-auto w-10 h-10 rounded-full border border-white/10 flex items-center justify-center relative overflow-hidden"
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.6 }}
+                  className="mx-auto mb-1 flex items-center justify-center"
                 >
-                  <Sparkles className="w-5 h-5 text-white/85" />
-                  <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent opacity-50" />
+                  <KalExamLogo size="md" linked={false} />
                 </motion.div>
 
                 <motion.h1

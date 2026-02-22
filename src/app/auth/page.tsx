@@ -10,6 +10,7 @@ import {
 
 import { useAuth } from "@/components/AuthProvider";
 import { SignInCard2 } from "@/components/ui/sign-in-card-2";
+import { TextShimmerWave } from "@/components/ui/text-shimmer-wave";
 import { getFirebaseAuth, getGoogleProvider } from "@/lib/firebase";
 
 type AuthMode = "signin" | "signup";
@@ -72,7 +73,9 @@ export default function AuthPage() {
     <Suspense
       fallback={
         <div className="min-h-screen bg-[#050505] text-white flex items-center justify-center">
-          <p className="text-neutral-400">Loading sign in...</p>
+          <TextShimmerWave className="text-sm [--base-color:#a3a3a3] [--base-gradient-color:#ffffff]" duration={1}>
+            Loading sign in...
+          </TextShimmerWave>
         </div>
       }
     >
@@ -95,7 +98,7 @@ function AuthPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [helperMessage, setHelperMessage] = useState<string | null>(null);
 
-  const nextPath = useMemo(() => searchParams.get("next") ?? "/upload", [searchParams]);
+  const nextPath = useMemo(() => searchParams.get("next") ?? "/dashboard", [searchParams]);
 
   useEffect(() => {
     if (!loading && user) {

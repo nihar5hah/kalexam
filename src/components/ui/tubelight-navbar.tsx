@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react"
 import { motion } from "framer-motion"
 import Link from "next/link"
+import { usePathname } from "next/navigation"
 import { LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { HoverBorderGradient } from "@/components/ui/hover-border-gradient"
@@ -19,14 +20,26 @@ interface NavBarProps {
 }
 
 export function NavBar({ items, className }: NavBarProps) {
-  const [activeTab, setActiveTab] = useState(items[0]?.name ?? "")
+  const pathname = usePathname()
+  const [selectedTab, setSelectedTab] = useState(items[0]?.name ?? "")
   const [isMobile, setIsMobile] = useState(false)
+
+  const directMatch = items.find((item) => {
+    if (item.url.startsWith("#")) {
+      return false
+    }
+
+    const targetPath = item.url.split("?")[0] ?? item.url
+    return pathname === targetPath || pathname.startsWith(targetPath + "/")
+  })
+
+  const activeTab = directMatch?.name ?? selectedTab
 
   const handleNavClick = (
     event: React.MouseEvent<HTMLAnchorElement>,
     item: NavItem,
   ) => {
-    setActiveTab(item.name)
+    setSelectedTab(item.name)
 
     if (!item.url.startsWith("#")) {
       return
@@ -75,27 +88,26 @@ export function NavBar({ items, className }: NavBarProps) {
                 href={item.url}
                 onClick={(event) => handleNavClick(event, item)}
                 className={cn(
-                  "relative cursor-pointer text-sm font-semibold px-6 py-2 rounded-full transition-colors",
-                  "text-foreground/80 hover:text-primary",
-                  isActive && "bg-muted text-primary",
+                  "relative cursor-pointer text-sm font-semibold px-6 py-2 rounded-full transition-colors duration-200",
+                "text-foreground/80 hover:text-white transition-colors",
+                isActive && "text-white",
                 )}
               >
                 {isMobile ? <Icon size={18} strokeWidth={2.5} /> : <span>{item.name}</span>}
+
                 {isActive && (
                   <motion.div
                     layoutId="lamp"
-                    className="absolute inset-0 w-full bg-primary/5 rounded-full -z-10"
+                    className="absolute inset-0 w-full bg-orange-500/10 rounded-full -z-10 border border-orange-400/20"
                     initial={false}
                     transition={{
                       type: "spring",
-                      stiffness: 300,
+                      stiffness: 320,
                       damping: 30,
                     }}
                   >
-                    <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-8 h-1 bg-primary rounded-t-full">
-                      <div className="absolute w-12 h-6 bg-primary/20 rounded-full blur-md -top-2 -left-2" />
-                      <div className="absolute w-8 h-6 bg-primary/20 rounded-full blur-md -top-1" />
-                      <div className="absolute w-4 h-4 bg-primary/20 rounded-full blur-sm top-0 left-2" />
+                    <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-7 h-[2px] bg-orange-400 rounded-full">
+                      <div className="absolute w-10 h-4 bg-orange-400/20 rounded-full blur-md -top-1 -left-1.5" />
                     </div>
                   </motion.div>
                 )}

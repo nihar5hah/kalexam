@@ -16,6 +16,24 @@ import {
 import { StrategyResult, UploadedFile } from "@/lib/ai/types";
 import { getFirebaseDb } from "@/lib/firebase";
 
+/**
+ * Recursively replaces every `undefined` value with `null` so that Firestore
+ * never rejects the payload with "Unsupported field value: undefined".
+ */
+function sanitizeForFirestore<T>(value: T): T {
+  if (value === undefined) return null as unknown as T;
+  if (value === null) return value;
+  if (Array.isArray(value)) return value.map(sanitizeForFirestore) as unknown as T;
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = sanitizeForFirestore(v);
+    }
+    return out as T;
+  }
+  return value;
+}
+
 export type StudySession = {
   userId: string;
   strategyId: string;
@@ -57,13 +75,28 @@ export type StudySession = {
     totalTopics: number;
     percentage: number;
   };
+  readinessScore: number;
+  examReadinessTimeline: Array<{
+    timestamp: string;
+    score: number;
+  }>;
+  dashboardMetrics?: {
+    todaysFocusTopic?: string | null;
+    weakestTopic?: string | null;
+    weakestChapter?: string | null;
+    estimatedHoursRemaining: number;
+    suggestedStudyPath: string[];
+  };
+  examDate?: string | null;
   topicProgress: Record<
     string,
     {
       status: "not_started" | "learning" | "completed";
       timeSpent: number;
-      lastOpened?: Timestamp;
-      confidenceScore: number;
+      confidence: number;
+      revisitCount: number;
+      skippedCount: number;
+      lastInteraction?: Timestamp;
       completedAt?: Timestamp;
     }
   >;
@@ -78,6 +111,7 @@ type CreateStudySessionInput = {
   syllabusFiles: UploadedFile[];
   materialFiles: UploadedFile[];
   generatedStrategy: StrategyResult;
+  examDate?: string | null;
 };
 
 function toProgress(strategy: StrategyResult): StudySession["progress"] {
@@ -94,14 +128,90 @@ function toInitialTopicProgress(strategy: StrategyResult): StudySession["topicPr
     accumulator[topic.slug] = {
       status: "not_started",
       timeSpent: 0,
-      confidenceScore: 0,
+      confidence: 0,
+      revisitCount: 0,
+      skippedCount: 0,
     };
     return accumulator;
   }, {});
 }
 
+function clamp(num: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, num));
+}
+
+function computeReadiness(topicProgress: StudySession["topicProgress"], totalTopics: number): number {
+  const entries = Object.values(topicProgress);
+  if (!entries.length || totalTopics <= 0) {
+    return 0;
+  }
+
+  const completed = entries.filter((entry) => entry.status === "completed").length;
+  const confidenceAvg = Math.round(
+    entries.reduce((sum, entry) => sum + (entry.confidence ?? 0), 0) / entries.length,
+  );
+  const skippedPenalty = entries.reduce((sum, entry) => sum + (entry.skippedCount ?? 0), 0) * 2;
+  const completionComponent = Math.round((completed / totalTopics) * 70);
+  const confidenceComponent = Math.round((confidenceAvg / 100) * 30);
+
+  return clamp(completionComponent + confidenceComponent - skippedPenalty, 0, 100);
+}
+
+function computeDashboardMetrics(
+  strategy: StrategyResult,
+  topicProgress: StudySession["topicProgress"],
+): NonNullable<StudySession["dashboardMetrics"]> {
+  const topics = strategy.topics;
+  const byWeakness = [...topics]
+    .map((topic) => {
+      const progress = topicProgress[topic.slug];
+      const confidence = progress?.confidence ?? 0;
+      const revisit = progress?.revisitCount ?? 0;
+      const skipped = progress?.skippedCount ?? 0;
+      const likelihood = topic.examLikelihoodScore ?? 0;
+      const score = likelihood + (100 - confidence) + revisit * 6 + skipped * 8;
+      return { topic, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const weakest = byWeakness[0]?.topic;
+  const todaysFocus = byWeakness.find((item) => (topicProgress[item.topic.slug]?.status ?? "not_started") !== "completed")?.topic;
+
+  const weakestChapter = strategy.chapters
+    .map((chapter) => {
+      const chapterConfidence = chapter.topics.reduce((sum, chapterTopic) => {
+        const confidence = topicProgress[chapterTopic.slug]?.confidence ?? 0;
+        return sum + confidence;
+      }, 0);
+      const avgConfidence = chapter.topics.length ? chapterConfidence / chapter.topics.length : 0;
+      return { title: chapter.chapterTitle, avgConfidence };
+    })
+    .sort((a, b) => a.avgConfidence - b.avgConfidence)[0]?.title;
+
+  const incomplete = topics.filter((topic) => (topicProgress[topic.slug]?.status ?? "not_started") !== "completed");
+  const estimatedHoursRemaining = Math.max(0, Math.round(incomplete.length * 0.75));
+
+  return {
+    todaysFocusTopic: todaysFocus?.title ?? null,
+    weakestTopic: weakest?.title ?? null,
+    weakestChapter: weakestChapter ?? null,
+    estimatedHoursRemaining,
+    suggestedStudyPath: incomplete.slice(0, 4).map((topic) => topic.title),
+  };
+}
+
+function buildReadinessTimeline(
+  current: StudySession["examReadinessTimeline"] | undefined,
+  score: number,
+): StudySession["examReadinessTimeline"] {
+  const next = [...(current ?? []), { timestamp: new Date().toISOString(), score }];
+  return next.slice(-30);
+}
+
 export async function createStudySession(input: CreateStudySessionInput): Promise<string> {
   const db = getFirebaseDb();
+  const initialTopicProgress = toInitialTopicProgress(input.generatedStrategy);
+  const initialReadiness = computeReadiness(initialTopicProgress, input.generatedStrategy.topics.length);
   const sessionRef = await addDoc(collection(db, "users", input.userId, "studySessions"), {
     userId: input.userId,
     strategyId: input.strategyId,
@@ -112,7 +222,11 @@ export async function createStudySession(input: CreateStudySessionInput): Promis
     studyContent: {},
     chatCache: {},
     progress: toProgress(input.generatedStrategy),
-    topicProgress: toInitialTopicProgress(input.generatedStrategy),
+    readinessScore: initialReadiness,
+    examReadinessTimeline: [{ timestamp: new Date().toISOString(), score: initialReadiness }],
+    dashboardMetrics: computeDashboardMetrics(input.generatedStrategy, initialTopicProgress),
+    examDate: input.examDate ?? null,
+    topicProgress: initialTopicProgress,
     lastOpenedAt: null,
     deletedAt: null,
     createdAt: serverTimestamp(),
@@ -162,6 +276,22 @@ async function getSessionRefByStrategyId(userId: string, strategyId: string) {
   return snapshot.docs[0]?.ref ?? null;
 }
 
+export async function getStudySessionByStrategyId(userId: string, strategyId: string): Promise<{ id: string; data: StudySession } | null> {
+  const db = getFirebaseDb();
+  const sessionsRef = collection(db, "users", userId, "studySessions");
+  const sessionQuery = query(sessionsRef, where("strategyId", "==", strategyId), limit(1));
+  const snapshot = await getDocs(sessionQuery);
+  const docSnap = snapshot.docs[0];
+  if (!docSnap) {
+    return null;
+  }
+
+  return {
+    id: docSnap.id,
+    data: docSnap.data() as StudySession,
+  };
+}
+
 export async function markTopicLearningInSession(userId: string, strategyId: string, topicSlug: string) {
   const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
   if (!sessionRef) {
@@ -169,13 +299,81 @@ export async function markTopicLearningInSession(userId: string, strategyId: str
   }
 
   const sessionDoc = await getDoc(sessionRef);
-  const topicProgress = (sessionDoc.data()?.topicProgress ?? {}) as StudySession["topicProgress"];
+  const data = sessionDoc.data() as StudySession | undefined;
+  if (!data) {
+    return;
+  }
+
+  const topicProgress = (data.topicProgress ?? {}) as StudySession["topicProgress"];
   const existing = topicProgress[topicSlug];
+  const nextRevisitCount = (existing?.revisitCount ?? 0) + (existing?.lastInteraction ? 1 : 0);
+  const nextTopicProgress: StudySession["topicProgress"] = {
+    ...topicProgress,
+    [topicSlug]: {
+      status: existing?.status === "completed" ? "completed" : "learning",
+      timeSpent: existing?.timeSpent ?? 0,
+      confidence: existing?.confidence ?? 0,
+      revisitCount: nextRevisitCount,
+      skippedCount: existing?.skippedCount ?? 0,
+    },
+  };
+
+  const totalTopics = data.progress.totalTopics || data.generatedStrategy.topics.length || 0;
+  const readiness = computeReadiness(nextTopicProgress, totalTopics);
+  const timeline = buildReadinessTimeline(data.examReadinessTimeline, readiness);
+  const dashboardMetrics = computeDashboardMetrics(data.generatedStrategy, nextTopicProgress);
 
   await updateDoc(sessionRef, {
     [`topicProgress.${topicSlug}.status`]: existing?.status === "completed" ? "completed" : "learning",
-    [`topicProgress.${topicSlug}.lastOpened`]: serverTimestamp(),
+    [`topicProgress.${topicSlug}.revisitCount`]: nextRevisitCount,
+    [`topicProgress.${topicSlug}.lastInteraction`]: serverTimestamp(),
     lastOpenedAt: serverTimestamp(),
+    readinessScore: readiness,
+    examReadinessTimeline: timeline,
+    dashboardMetrics: sanitizeForFirestore(dashboardMetrics),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function markTopicSkippedInSession(userId: string, strategyId: string, topicSlug: string) {
+  const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
+  if (!sessionRef) {
+    return;
+  }
+
+  const sessionDoc = await getDoc(sessionRef);
+  const data = sessionDoc.data() as StudySession | undefined;
+  if (!data) {
+    return;
+  }
+
+  const topicProgress = data.topicProgress ?? {};
+  const existing = topicProgress[topicSlug] ?? {
+    status: "not_started" as const,
+    timeSpent: 0,
+    confidence: 0,
+    revisitCount: 0,
+    skippedCount: 0,
+  };
+
+  const nextTopicProgress: StudySession["topicProgress"] = {
+    ...topicProgress,
+    [topicSlug]: {
+      ...existing,
+      skippedCount: (existing.skippedCount ?? 0) + 1,
+    },
+  };
+
+  const totalTopics = data.progress.totalTopics || data.generatedStrategy.topics.length || 0;
+  const readiness = computeReadiness(nextTopicProgress, totalTopics);
+  const timeline = buildReadinessTimeline(data.examReadinessTimeline, readiness);
+
+  await updateDoc(sessionRef, {
+    [`topicProgress.${topicSlug}.skippedCount`]: (existing.skippedCount ?? 0) + 1,
+    [`topicProgress.${topicSlug}.lastInteraction`]: serverTimestamp(),
+    readinessScore: readiness,
+    examReadinessTimeline: timeline,
+    dashboardMetrics: sanitizeForFirestore(computeDashboardMetrics(data.generatedStrategy, nextTopicProgress)),
     updatedAt: serverTimestamp(),
   });
 }
@@ -185,7 +383,7 @@ export async function markTopicCompletedInSession(
   strategyId: string,
   topicSlug: string,
   learningDurationSeconds = 0,
-  confidenceScore = 75,
+  confidence = 75,
 ) {
   const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
   if (!sessionRef) {
@@ -207,25 +405,90 @@ export async function markTopicCompletedInSession(
     [topicSlug]: {
       status: "completed",
       timeSpent: nextTimeSpent,
-      confidenceScore,
-      lastOpened: current?.lastOpened,
+      confidence,
+      revisitCount: current?.revisitCount ?? 0,
+      skippedCount: current?.skippedCount ?? 0,
     },
   };
 
   const totalTopics = data.progress.totalTopics || data.generatedStrategy.topics.length || 0;
   const completedTopics = Object.values(nextTopicProgress).filter((entry) => entry.status === "completed").length;
   const percentage = totalTopics ? Math.round((completedTopics / totalTopics) * 100) : 0;
+  const readiness = computeReadiness(nextTopicProgress, totalTopics);
+  const timeline = buildReadinessTimeline(data.examReadinessTimeline, readiness);
 
   await updateDoc(sessionRef, {
     [`topicProgress.${topicSlug}.status`]: "completed",
     [`topicProgress.${topicSlug}.timeSpent`]: nextTimeSpent,
-    [`topicProgress.${topicSlug}.confidenceScore`]: confidenceScore,
+    [`topicProgress.${topicSlug}.confidence`]: confidence,
     [`topicProgress.${topicSlug}.completedAt`]: serverTimestamp(),
-    [`topicProgress.${topicSlug}.lastOpened`]: serverTimestamp(),
+    [`topicProgress.${topicSlug}.lastInteraction`]: serverTimestamp(),
     lastOpenedAt: serverTimestamp(),
     "progress.completedTopics": completedTopics,
     "progress.totalTopics": totalTopics,
     "progress.percentage": percentage,
+    readinessScore: readiness,
+    examReadinessTimeline: timeline,
+    dashboardMetrics: sanitizeForFirestore(computeDashboardMetrics(data.generatedStrategy, nextTopicProgress)),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function recordQuizAttemptInSession(
+  userId: string,
+  strategyId: string,
+  topicSlug: string,
+  payload: {
+    score: number;
+    durationSeconds?: number;
+  },
+) {
+  const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
+  if (!sessionRef) {
+    return;
+  }
+
+  const sessionDoc = await getDoc(sessionRef);
+  const data = sessionDoc.data() as StudySession | undefined;
+  if (!data) {
+    return;
+  }
+
+  const topicProgress = data.topicProgress ?? {};
+  const existing = topicProgress[topicSlug] ?? {
+    status: "not_started" as const,
+    timeSpent: 0,
+    confidence: 0,
+    revisitCount: 0,
+    skippedCount: 0,
+  };
+
+  const nextConfidence = clamp(Math.round(((existing.confidence ?? 0) * 0.6) + (payload.score * 0.4)), 0, 100);
+  const nextTimeSpent = existing.timeSpent + Math.max(0, Math.round(payload.durationSeconds ?? 0));
+  const nextStatus = existing.status === "completed" ? "completed" : "learning";
+
+  const nextTopicProgress: StudySession["topicProgress"] = {
+    ...topicProgress,
+    [topicSlug]: {
+      ...existing,
+      status: nextStatus,
+      confidence: nextConfidence,
+      timeSpent: nextTimeSpent,
+    },
+  };
+
+  const totalTopics = data.progress.totalTopics || data.generatedStrategy.topics.length || 0;
+  const readiness = computeReadiness(nextTopicProgress, totalTopics);
+  const timeline = buildReadinessTimeline(data.examReadinessTimeline, readiness);
+
+  await updateDoc(sessionRef, {
+    [`topicProgress.${topicSlug}.status`]: nextStatus,
+    [`topicProgress.${topicSlug}.confidence`]: nextConfidence,
+    [`topicProgress.${topicSlug}.timeSpent`]: nextTimeSpent,
+    [`topicProgress.${topicSlug}.lastInteraction`]: serverTimestamp(),
+    readinessScore: readiness,
+    examReadinessTimeline: timeline,
+    dashboardMetrics: sanitizeForFirestore(computeDashboardMetrics(data.generatedStrategy, nextTopicProgress)),
     updatedAt: serverTimestamp(),
   });
 }
@@ -274,13 +537,13 @@ export async function saveTopicCacheToSession(
   }
 
   await updateDoc(sessionRef, {
-    [`studyContent.${topicSlug}`]: {
+    [`studyContent.${topicSlug}`]: sanitizeForFirestore({
       signature: payload.signature,
       schemaVersion: payload.schemaVersion,
       generatedAt: new Date().toISOString(),
       model: payload.model,
       content: payload.content,
-    },
+    }),
     updatedAt: serverTimestamp(),
   });
 }
@@ -352,7 +615,7 @@ export async function saveChatCacheToSession(
   const key = normalizeCacheKey(cacheKey);
 
   await updateDoc(sessionRef, {
-    [`chatCache.${key}`]: {
+    [`chatCache.${key}`]: sanitizeForFirestore({
       signature: payload.signature,
       schemaVersion: payload.schemaVersion,
       generatedAt: new Date().toISOString(),
@@ -360,7 +623,7 @@ export async function saveChatCacheToSession(
       answer: payload.answer,
       confidence: payload.confidence,
       citations: payload.citations,
-    },
+    }),
     updatedAt: serverTimestamp(),
   });
 }

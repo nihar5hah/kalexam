@@ -97,7 +97,7 @@ export function StrategyReport({
       }
     };
 
-    writeWrapped("KalExam — Exam Strategy Report", 18, true);
+    writeWrapped("KalExam — Exam Session Report", 18, true);
     cursorY += 4;
     writeWrapped(`Model: ${result.modelUsed}`, 11, false);
     writeWrapped(`Coverage: ${result.strategySummary.estimatedCoverage}`, 11, false);
@@ -132,7 +132,7 @@ export function StrategyReport({
       cursorY += 6;
     }
 
-    const fileName = `kalexam-strategy-${strategyId || "report"}.pdf`;
+    const fileName = `kalexam-session-${strategyId || "report"}.pdf`;
     pdf.save(fileName);
   }
 
@@ -144,14 +144,14 @@ export function StrategyReport({
       className="space-y-6"
     >
       <motion.div variants={fadeIn} className="space-y-3">
-        <h1 className="text-3xl md:text-5xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-b from-white via-neutral-300 to-[#050505] pb-2">
+        <h1 className="text-3xl md:text-5xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-b from-white to-neutral-400 pb-2">
           Your Chapter Study Plan
         </h1>
         <p className="text-sm text-neutral-400">Generated using: {result.modelUsed}</p>
         <Button
           type="button"
           onClick={() => void handleDownloadPdf()}
-          className="rounded-full bg-white text-black hover:bg-neutral-200"
+          className="rounded-full border border-white/15 bg-white/5 text-neutral-300 hover:bg-white/10 hover:text-white transition-all"
         >
           Download PDF Report
         </Button>
@@ -166,7 +166,7 @@ export function StrategyReport({
             <p className="text-neutral-200 text-sm">{completedCount} / {chapters.length} chapters completed</p>
             <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
               <div
-                className="h-full bg-indigo-400 transition-all duration-300"
+                className="h-full bg-orange-500 transition-all duration-300"
                 style={{ width: `${chapters.length ? Math.round((completedCount / chapters.length) * 100) : 0}%` }}
               />
             </div>
@@ -185,7 +185,13 @@ export function StrategyReport({
           return (
             <Card
               key={`${chapter.chapterNumber}-${chapter.chapterTitle}`}
-              className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl"
+              className={`bg-white/5 border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl border border-l-4 ${
+                chapter.priority === "high"
+                  ? "border-l-red-500/60"
+                  : chapter.priority === "medium"
+                  ? "border-l-amber-500/60"
+                  : "border-l-emerald-500/40"
+              }`}
             >
               <CardHeader className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -200,15 +206,15 @@ export function StrategyReport({
                     <Badge className={`${priorityClass(chapter.priority)} border-none uppercase`}>Priority: {chapter.priority}</Badge>
                     <Badge className="bg-white/10 text-white border-none">Estimated Time: {chapter.estimatedTime}</Badge>
                     {typeof chapter.materialCoverage === "number" ? (
-                      <Badge className="bg-blue-500/20 text-blue-200 border-none">Coverage: {chapter.materialCoverage}%</Badge>
+                      <Badge className="bg-white/10 text-neutral-300 border-none">Coverage: {chapter.materialCoverage}%</Badge>
                     ) : null}
                     {chapter.examLikelihoodSummary ? (
-                      <Badge className="bg-fuchsia-500/20 text-fuchsia-200 border-none">
+                      <Badge className="bg-orange-500/15 text-orange-300 border-none">
                         🔥 Avg Likelihood: {chapter.examLikelihoodSummary.averageLikelihood}%
                       </Badge>
                     ) : null}
                     {chapter.weightage ? (
-                      <Badge className="bg-indigo-500/20 text-indigo-200 border-none">Weightage: {chapter.weightage}</Badge>
+                      <Badge className="bg-white/10 text-neutral-300 border-none">Weightage: {chapter.weightage}</Badge>
                     ) : null}
                     {isDone ? <Badge className="bg-emerald-500/20 text-emerald-200 border-none">Completed</Badge> : null}
                   </div>
@@ -246,10 +252,10 @@ export function StrategyReport({
 
                 <Button
                   asChild
-                  className="rounded-full bg-white text-black hover:bg-neutral-200"
+                  className="rounded-full bg-orange-500 hover:bg-orange-400 text-white shadow-[0_0_16px_rgba(249,115,22,0.25)] hover:shadow-[0_0_24px_rgba(249,115,22,0.4)] transition-all"
                   disabled={!startTopic}
                 >
-                  <Link href={startTopic ? `/study/${startTopic.slug}?id=${strategyId}` : `/strategy?id=${strategyId}`}>
+                  <Link href={startTopic ? `/study/${startTopic.slug}?id=${strategyId}` : `/dashboard?id=${strategyId}`}>
                     {chapterActionLabel}
                   </Link>
                 </Button>

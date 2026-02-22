@@ -9,6 +9,13 @@ import {
 } from "@/lib/ai/types";
 import { parseUploadedFiles } from "@/lib/parsing";
 import { extractSyllabusChapters } from "@/lib/parsing/exam-intelligence";
+import {
+  createStrategyJobDoc,
+  getStrategyJobDoc,
+  type StrategyJobDoc,
+  type StrategyJobStage,
+  updateStrategyJobDoc,
+} from "@/lib/firestore/strategy-jobs";
 import { computeExamLikelihood } from "@/lib/study/exam-likelihood";
 
 export type StrategyPipelineRequest = {
@@ -25,28 +32,20 @@ export type StrategyPipelineRequest = {
   } | null;
 };
 
-export type StrategyJobStage =
-  | "queued"
-  | "extracting_text"
-  | "analyzing_chapters"
-  | "generating_strategy"
-  | "preparing_study_content"
-  | "complete"
-  | "failed";
-
 export type StrategyJobState = {
   id: string;
   userId: string;
+  status: "running" | "complete" | "failed";
   stage: StrategyJobStage;
   progress: number;
   createdAt: number;
   updatedAt: number;
-  request: StrategyPipelineRequest;
   result?: StrategyResult;
   error?: string;
 };
 
-const strategyJobs = new Map<string, StrategyJobState>();
+const strategyJobRequests = new Map<string, StrategyPipelineRequest>();
+const strategyJobOwners = new Map<string, string>();
 
 function parseWeightage(weightage?: string): number {
   if (!weightage) {
@@ -214,27 +213,35 @@ function toModelConfig(body: StrategyPipelineRequest): ModelConfig {
   return { modelType: "gemini" };
 }
 
-function updateJob(jobId: string, patch: Partial<StrategyJobState>) {
-  const current = strategyJobs.get(jobId);
-  if (!current) {
-    return;
-  }
-
-  strategyJobs.set(jobId, {
-    ...current,
-    ...patch,
-    updatedAt: Date.now(),
+async function updateJob(userId: string, jobId: string, patch: Partial<StrategyJobState>) {
+  await updateStrategyJobDoc(userId, jobId, {
+    status: patch.status,
+    stage: patch.stage,
+    progress: patch.progress,
+    error: patch.error,
+    strategy: patch.result,
   });
 }
 
 async function runStrategyPipeline(jobId: string) {
-  const job = strategyJobs.get(jobId);
-  if (!job) {
+  const jobDoc = await getStrategyJobById(jobId);
+  if (!jobDoc) {
+    return;
+  }
+
+  const request = strategyJobRequests.get(jobId);
+  if (!request) {
+    await updateJob(jobDoc.userId, jobId, {
+      status: "failed",
+      stage: "failed",
+      progress: 100,
+      error: "Job request context missing. Please retry strategy generation.",
+    });
     return;
   }
 
   try {
-    const body = job.request;
+    const body = request;
     const syllabusFiles = body.syllabusFiles ?? [];
     const syllabusTextInput = body.syllabusTextInput?.trim() ?? "";
     const studyMaterialFiles = body.studyMaterialFiles ?? [];
@@ -251,15 +258,15 @@ async function runStrategyPipeline(jobId: string) {
     const modelConfig = toModelConfig(body);
     const allFiles = [...syllabusFiles, ...studyMaterialFiles, ...previousPaperFiles];
 
-    updateJob(jobId, { stage: "extracting_text", progress: 45 });
+    await updateJob(jobDoc.userId, jobId, { stage: "extracting_text", progress: 45, status: "running" });
     const parsed = await parseUploadedFiles(allFiles);
     const mergedSyllabusText = [parsed.syllabusText, syllabusTextInput].filter(Boolean).join("\n\n").trim();
     const chapterHints = extractSyllabusChapters(mergedSyllabusText, parsed.materialText);
 
-    updateJob(jobId, { stage: "analyzing_chapters", progress: 62 });
+    await updateJob(jobDoc.userId, jobId, { stage: "analyzing_chapters", progress: 62, status: "running" });
     const modelLabel = getModelLabel(body);
 
-    updateJob(jobId, { stage: "generating_strategy", progress: 78 });
+    await updateJob(jobDoc.userId, jobId, { stage: "generating_strategy", progress: 78, status: "running" });
     const strategy = await generateStrategy(
       {
         hoursLeft: body.hoursLeft,
@@ -279,10 +286,11 @@ async function runStrategyPipeline(jobId: string) {
 
     const normalized = normalizeStrategyResult(strategy, body.hoursLeft, modelLabel);
 
-    updateJob(jobId, { stage: "preparing_study_content", progress: 90 });
+    await updateJob(jobDoc.userId, jobId, { stage: "preparing_study_content", progress: 90, status: "running" });
     const chapterMapped = mapWithChapterHints(normalized, chapterHints, parsed.previousPaperText, allFiles);
 
-    updateJob(jobId, {
+    await updateJob(jobDoc.userId, jobId, {
+      status: "complete",
       stage: "complete",
       progress: 100,
       result: {
@@ -292,34 +300,82 @@ async function runStrategyPipeline(jobId: string) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to generate strategy";
-    updateJob(jobId, {
+    await updateJob(jobDoc.userId, jobId, {
+      status: "failed",
       stage: "failed",
       progress: 100,
       error: message,
     });
+  } finally {
+    strategyJobRequests.delete(jobId);
+    strategyJobOwners.delete(jobId);
   }
 }
 
-export function createStrategyJob(userId: string, request: StrategyPipelineRequest): StrategyJobState {
+export async function createStrategyJob(userId: string, request: StrategyPipelineRequest): Promise<StrategyJobState> {
   const id = `job_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
   const now = Date.now();
 
-  const created: StrategyJobState = {
+  await createStrategyJobDoc({
+    jobId: id,
+    userId,
+    stage: "queued",
+    progress: 35,
+  });
+
+  strategyJobRequests.set(id, request);
+  strategyJobOwners.set(id, userId);
+  void runStrategyPipeline(id);
+
+  return {
     id,
     userId,
+    status: "running",
     stage: "queued",
     progress: 35,
     createdAt: now,
     updatedAt: now,
-    request,
   };
-
-  strategyJobs.set(id, created);
-  void runStrategyPipeline(id);
-
-  return created;
 }
 
-export function getStrategyJob(jobId: string): StrategyJobState | null {
-  return strategyJobs.get(jobId) ?? null;
+function toMillis(value: unknown): number {
+  if (typeof value === "number") {
+    return value;
+  }
+  if (value && typeof value === "object" && "toMillis" in value && typeof value.toMillis === "function") {
+    return value.toMillis();
+  }
+  return Date.now();
+}
+
+function toStrategyJobState(job: StrategyJobDoc): StrategyJobState {
+  return {
+    id: job.jobId,
+    userId: job.userId,
+    status: job.status,
+    stage: job.stage,
+    progress: job.progress,
+    createdAt: toMillis(job.createdAt),
+    updatedAt: toMillis(job.updatedAt),
+    result: job.strategy,
+    error: job.error,
+  };
+}
+
+export async function getStrategyJob(userId: string, jobId: string): Promise<StrategyJobState | null> {
+  const job = await getStrategyJobDoc(userId, jobId);
+  if (!job || job.userId !== userId) {
+    return null;
+  }
+
+  return toStrategyJobState(job);
+}
+
+async function getStrategyJobById(jobId: string): Promise<StrategyJobDoc | null> {
+  const userId = strategyJobOwners.get(jobId);
+  if (!userId) {
+    return null;
+  }
+
+  return getStrategyJobDoc(userId, jobId);
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getDownloadURL, ref, uploadBytesResumable } from "firebase/storage";
 
@@ -60,7 +60,7 @@ const STAGE_LABELS: Record<ProgressStage, string> = {
   uploading: "Uploading files...",
   extracting: "Extracting text from uploaded files...",
   analyzing: "Analyzing syllabus & chapters...",
-  strategy: "Generating exam strategy...",
+  strategy: "Generating exam session...",
   content: "Building learning roadmap...",
   done: "Completed.",
 };
@@ -186,6 +186,7 @@ export function UploadForm() {
   const [studyMaterialFiles, setStudyMaterialFiles] = useState<File[]>([]);
   const [previousPaperFiles, setPreviousPaperFiles] = useState<File[]>([]);
   const [hoursLeft, setHoursLeft] = useState<number>(6);
+  const [examDate, setExamDate] = useState("");
 
   const [modelType, setModelType] = useState<ModelType>("gemini");
   const [customConfig, setCustomConfig] = useState<CustomProviderConfig>({
@@ -198,6 +199,14 @@ export function UploadForm() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [progressStage, setProgressStage] = useState<ProgressStage>("idle");
   const [error, setError] = useState<string | null>(null);
+
+  const uploadStep = useMemo(() => {
+    const hasSyllabus = syllabusFiles.length > 0 || syllabusTextInput.trim().length > 0;
+    const hasStudyMaterial = studyMaterialFiles.length > 0;
+    if (!hasSyllabus || !hasStudyMaterial) return 1;
+    if (hoursLeft <= 0) return 2;
+    return 3;
+  }, [syllabusFiles.length, syllabusTextInput, studyMaterialFiles.length, hoursLeft]);
 
   async function animateProgressTo(target: number, durationMs = 600) {
     const start = uploadProgress;
@@ -254,7 +263,7 @@ export function UploadForm() {
 
     try {
       if (!user) {
-        throw new Error("You must be signed in to generate a strategy.");
+        throw new Error("You must be signed in to generate a session.");
       }
 
       setProgressStage("uploading");
@@ -323,7 +332,7 @@ export function UploadForm() {
 
       if (!jobResponse.ok) {
         const responseText = await jobResponse.text();
-        throw new Error(responseText || "Failed to start strategy generation");
+        throw new Error(responseText || "Failed to start session generation");
       }
 
       const createdJob = (await jobResponse.json()) as CreateStrategyJobApiResponse;
@@ -331,7 +340,7 @@ export function UploadForm() {
 
       for (let attempt = 0; attempt < 180; attempt += 1) {
         const statusResponse = await fetch(
-          `/api/generate-strategy/jobs?id=${encodeURIComponent(createdJob.jobId)}`,
+          `/api/generate-strategy/jobs?id=${encodeURIComponent(createdJob.jobId)}&userId=${encodeURIComponent(user.uid)}`,
           {
             method: "GET",
             headers: { "Content-Type": "application/json" },
@@ -340,7 +349,7 @@ export function UploadForm() {
         );
 
         if (!statusResponse.ok) {
-          throw new Error("Unable to fetch strategy job status");
+          throw new Error("Unable to fetch session job status");
         }
 
         const statusData = (await statusResponse.json()) as StrategyJobStatusApiResponse;
@@ -351,12 +360,12 @@ export function UploadForm() {
         setUploadProgress((current) => Math.max(current, cappedProgress));
 
         if (job.stage === "failed") {
-          throw new Error(job.error || "Strategy generation job failed.");
+          throw new Error(job.error || "Session generation job failed.");
         }
 
         if (job.stage === "complete") {
           if (!job.strategy) {
-            throw new Error("Strategy job completed without strategy payload.");
+            throw new Error("Session job completed without content payload.");
           }
 
           data = { strategy: job.strategy };
@@ -369,7 +378,7 @@ export function UploadForm() {
       }
 
       if (!data) {
-        throw new Error("Strategy generation timed out. Please try again.");
+        throw new Error("Session generation timed out. Please try again.");
       }
 
       const strategyId = await createStrategy({
@@ -390,6 +399,7 @@ export function UploadForm() {
         syllabusFiles: uploadedSyllabus,
         materialFiles: uploadedMaterial,
         generatedStrategy: data.strategy,
+        examDate: examDate || null,
       });
 
       const fileSignature = `${STUDY_CACHE_SCHEMA_VERSION}:${uploadedSyllabus
@@ -466,10 +476,10 @@ export function UploadForm() {
         sessionStorage.setItem(`study-model:${strategyId}`, JSON.stringify(studyModelContext));
       }
 
-      router.push(`/strategy?id=${strategyId}`);
+      router.push(`/dashboard?id=${strategyId}`);
     } catch (caughtError) {
       const message =
-        caughtError instanceof Error ? caughtError.message : "Failed to generate strategy.";
+        caughtError instanceof Error ? caughtError.message : "Failed to generate session.";
       setError(message);
     } finally {
       setLoading(false);
@@ -480,6 +490,41 @@ export function UploadForm() {
     <Card className="w-full max-w-2xl bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl">
       <CardHeader>
         <CardTitle className="text-white text-2xl">Upload & Generate</CardTitle>
+        {/* 3-step UX progress indicator */}
+        <div className="flex items-center gap-1 pt-3">
+          {(
+            [
+              { step: 1, label: "Upload Files" },
+              { step: 2, label: "Configure" },
+              { step: 3, label: "Generate" },
+            ] as const
+          ).flatMap(({ step, label }, idx) => {
+            const pill = (
+              <div
+                key={step}
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                  uploadStep === step
+                    ? "bg-orange-500 text-white shadow-[0_0_12px_rgba(249,115,22,0.3)]"
+                    : uploadStep > step
+                    ? "bg-white/8 text-neutral-300 border border-white/15"
+                    : "bg-white/5 text-neutral-500 border border-white/10"
+                }`}
+              >
+                <span className={`text-[10px] flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center ${uploadStep > step ? "bg-white/20" : ""}`}>
+                  {uploadStep > step ? "✓" : step}
+                </span>
+                <span className="hidden sm:inline">{label}</span>
+              </div>
+            );
+            if (idx < 2) {
+              return [
+                pill,
+                <div key={`line-${step}`} className={`flex-1 h-px ${uploadStep > step ? "bg-white/30" : "bg-white/10"}`} />,
+              ];
+            }
+            return [pill];
+          })}
+        </div>
       </CardHeader>
       <CardContent className="space-y-6">
         <FileUploadGroup
@@ -500,7 +545,7 @@ export function UploadForm() {
             onChange={(event) => setSyllabusTextInput(event.target.value)}
             placeholder="Paste chapter list / syllabus outline here..."
             rows={5}
-            className="w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-white outline-none transition focus:border-indigo-400/60 placeholder:text-neutral-500"
+            className="w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-white outline-none transition focus:border-white/30 placeholder:text-neutral-500"
           />
           <p className="text-xs text-neutral-400">
             Use this if you do not have a syllabus file. You can also combine both for better extraction.
@@ -539,7 +584,17 @@ export function UploadForm() {
             min={1}
             value={hoursLeft}
             onChange={(event) => setHoursLeft(Number(event.target.value))}
-            className="h-11 w-full rounded-2xl border border-white/10 bg-black/30 px-3 text-sm text-white outline-none transition focus:border-indigo-400/60"
+            className="h-11 w-full rounded-2xl border border-white/10 bg-black/30 px-3 text-sm text-white outline-none transition focus:border-white/30"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-sm text-neutral-300 font-medium">Exam date (optional)</label>
+          <input
+            type="date"
+            value={examDate}
+            onChange={(event) => setExamDate(event.target.value)}
+            className="h-11 w-full rounded-2xl border border-white/10 bg-black/30 px-3 text-sm text-white outline-none transition focus:border-white/30"
           />
         </div>
 
@@ -556,7 +611,7 @@ export function UploadForm() {
           <div className="space-y-2">
             <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden relative">
               <div
-                className="h-full bg-indigo-400 transition-all duration-300"
+                className="h-full bg-orange-500 transition-all duration-300"
                 style={{ width: `${uploadProgress}%` }}
               />
               <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.4s_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
@@ -570,9 +625,9 @@ export function UploadForm() {
           size="lg"
           disabled={loading}
           onClick={handleGenerateStrategy}
-          className="w-full rounded-2xl bg-white text-black hover:bg-neutral-200 py-6 font-medium"
+          className="w-full rounded-2xl bg-orange-500 hover:bg-orange-400 text-white py-6 font-medium shadow-[0_0_20px_rgba(249,115,22,0.25)] hover:shadow-[0_0_30px_rgba(249,115,22,0.45)] transition-all"
         >
-          {loading ? "Uploading & Generating..." : "Generate Strategy"}
+          {loading ? "Uploading & Generating..." : "Generate Session"}
         </Button>
       </CardContent>
     </Card>

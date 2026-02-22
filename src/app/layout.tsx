@@ -4,7 +4,12 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "KalExam - Exam kal hai? We got you.",
-  description: "AI-powered study strategy from your syllabus and notes.",
+  description: "AI-powered study session plan from your syllabus and notes.",
+  icons: {
+    icon: "/favicon.svg",
+    shortcut: "/favicon.svg",
+    apple: "/favicon.svg",
+  },
 };
 
 export default function RootLayout({

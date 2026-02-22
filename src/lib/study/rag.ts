@@ -97,6 +97,13 @@ export type ExamModeContent = {
   citations: SourceCitation[];
 };
 
+export type MicroQuizQuestion = {
+  question: string;
+  answer: string;
+  explanation: string;
+  difficulty: "easy" | "medium" | "hard";
+};
+
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
@@ -428,14 +435,38 @@ function normalizeStudyContent(
 async function getTopChunks(files: UploadedFile[], query: string, maxChunks = 4) {
   const parsed = await parseUploadedFiles(files);
   const tokens = tokenize(query);
-  const scored = parsed.sourceChunks
+  const scoredCandidates = parsed.sourceChunks
     .map((chunk) => ({
       chunk,
       score: scoreChunk(chunk.text, tokens) + sourcePriorityBoost(chunk.sourceType),
     }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, maxChunks);
+    .slice(0, Math.max(maxChunks * 2, 8));
+
+  const seen = new Set<string>();
+  const deduped = scoredCandidates.filter((item) => {
+    const key = item.chunk.text.toLowerCase().replace(/\s+/g, " ").slice(0, 220);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+
+  const overlapBoost = deduped
+    .map((item) => {
+      const overlap = tokens.reduce((count, token) => {
+        return item.chunk.text.toLowerCase().includes(token) ? count + 1 : count;
+      }, 0);
+      return {
+        ...item,
+        score: item.score + overlap * 2,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const scored = overlapBoost.slice(0, maxChunks);
 
   const averageCoverage = parsed.chapters.length
     ? Math.round(
@@ -886,6 +917,66 @@ export async function buildExamModeContent(
       confidence,
       weakAreas: ["Unable to infer all weak areas from available context."],
       examTip: "Revise definitions, solve one timed answer, then re-attempt exam mode.",
+      citations: retrieval.citations,
+    };
+  }
+}
+
+export async function buildMicroQuizContent(
+  files: UploadedFile[],
+  topic: string,
+  modelConfig: ModelConfig,
+  count = 4,
+): Promise<{ questions: MicroQuizQuestion[]; citations: SourceCitation[] }> {
+  const retrieval = await getTopChunks(files, `${topic} quiz questions`, 8);
+  if (!retrieval.chunks.length) {
+    return { questions: [], citations: [] };
+  }
+
+  const context = cleanRetrievedText(retrieval.chunks.join("\n\n"));
+  const prompt = [
+    "You are generating a micro quiz from uploaded material.",
+    "Use strictly and only the provided context.",
+    "If evidence is weak, avoid inventing facts.",
+    "Return only valid JSON with shape:",
+    '{ "questions": [{ "question": string, "answer": string, "explanation": string, "difficulty": "easy"|"medium"|"hard" }] }',
+    `Generate ${Math.max(3, Math.min(5, count))} short exam-style questions for topic: ${topic}.`,
+    "Each answer and explanation must be grounded in context.",
+    "Context:",
+    context,
+  ].join("\n");
+
+  try {
+    const generated = await toModelPrompt(modelConfig, prompt);
+    const parsed = parseJsonObject(generated);
+    const questionsRaw = Array.isArray(parsed?.questions) ? parsed.questions : [];
+
+    const questions = questionsRaw
+      .map((row) => {
+        const item = row as Record<string, unknown>;
+        const question = typeof item.question === "string" ? item.question.trim() : "";
+        const answer = typeof item.answer === "string" ? item.answer.trim() : "";
+        const explanation = typeof item.explanation === "string" ? item.explanation.trim() : "";
+        const difficultyRaw = typeof item.difficulty === "string" ? item.difficulty.toLowerCase() : "medium";
+        const difficulty: "easy" | "medium" | "hard" =
+          difficultyRaw === "easy" || difficultyRaw === "hard" ? difficultyRaw : "medium";
+
+        if (!question || !answer || !explanation) {
+          return null;
+        }
+
+        return { question, answer, explanation, difficulty };
+      })
+      .filter((item): item is MicroQuizQuestion => Boolean(item))
+      .slice(0, 5);
+
+    return {
+      questions,
+      citations: retrieval.citations,
+    };
+  } catch {
+    return {
+      questions: [],
       citations: retrieval.citations,
     };
   }

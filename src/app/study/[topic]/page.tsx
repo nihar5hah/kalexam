@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 
-import { AppTopNav } from "@/components/AppTopNav";
+import { AuthenticatedNavBar } from "@/components/AuthenticatedNavBar";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import { RequireAuth } from "@/components/RequireAuth";
 import { StrategyRecoveryView } from "@/components/StrategyRecoveryView";
@@ -14,6 +14,7 @@ import { AnimatedGlowingBorder } from "@/components/ui/animated-glowing-search-b
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { TextShimmerWave } from "@/components/ui/text-shimmer-wave";
 import { useAuth } from "@/components/AuthProvider";
 import {
   SourceCitation,
@@ -31,9 +32,12 @@ import {
   saveStudyTopicCache,
 } from "@/lib/firestore/strategies";
 import {
+  getStudySessionByStrategyId,
   getChatCacheFromSession,
   markTopicCompletedInSession,
   markTopicLearningInSession,
+  markTopicSkippedInSession,
+  recordQuizAttemptInSession,
   saveChatCacheToSession,
 } from "@/lib/firestore/study-sessions";
 import { FALLBACK_MESSAGE } from "@/lib/study/constants";
@@ -98,6 +102,18 @@ type LearnItemApiResponse = {
   citations: SourceCitation[];
 };
 
+type MicroQuizQuestion = {
+  question: string;
+  answer: string;
+  explanation: string;
+  difficulty: "easy" | "medium" | "hard";
+};
+
+type MicroQuizApiResponse = {
+  questions: MicroQuizQuestion[];
+  citations: SourceCitation[];
+};
+
 type ExamModeApiResponse = {
   likelyQuestions: Array<{
     question: string;
@@ -130,6 +146,12 @@ type QuickActionState = Record<
     confidence?: TopicConfidence;
   }
 >;
+
+type TopicSignal = {
+  confidence: number;
+  revisitCount: number;
+  skippedCount: number;
+};
 
 const STUDY_CACHE_SCHEMA_VERSION = "v2";
 
@@ -190,7 +212,9 @@ export default function StudyTopicPage() {
     <Suspense
       fallback={
         <div className="min-h-screen bg-[#050505] text-white flex items-center justify-center">
-          <p className="text-neutral-400">Loading study mode...</p>
+          <TextShimmerWave className="text-sm [--base-color:#a3a3a3] [--base-gradient-color:#ffffff]" duration={1}>
+            Loading study mode...
+          </TextShimmerWave>
         </div>
       }
     >
@@ -230,17 +254,25 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   const [contextFiles, setContextFiles] = useState<UploadedFile[]>([]);
   const topicOpenedAtRef = useRef<number | null>(null);
   const [topicStatuses, setTopicStatuses] = useState<Record<string, boolean>>({});
+  const [topicSignals, setTopicSignals] = useState<Record<string, TopicSignal>>({});
+  const [sessionExamDate, setSessionExamDate] = useState<string | null>(null);
 
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [asking, setAsking] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const [quickActions, setQuickActions] = useState<QuickActionState>({
     difference: { loading: false, content: "" },
     example: { loading: false, content: "" },
     examQuestion: { loading: false, content: "" },
     explainSimply: { loading: false, content: "" },
   });
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatHistory]);
+
   const [expandedOriginalQuestions, setExpandedOriginalQuestions] = useState<Record<string, boolean>>({});
   const [learnedItems, setLearnedItems] = useState<Record<string, { loading: boolean; content?: LearnItemApiResponse; error?: string }>>({});
+  const [microQuizzes, setMicroQuizzes] = useState<Record<string, { loading: boolean; questions?: MicroQuizQuestion[]; citations?: SourceCitation[]; error?: string; attempted?: boolean; score?: number }>>({});
   const [examMode, setExamMode] = useState<ExamModeApiResponse | null>(null);
   const [examModeLoading, setExamModeLoading] = useState(false);
 
@@ -268,7 +300,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       if (!strategyId) {
         const recent = await listRecentStrategies(user.uid, 5);
         setRecentStrategies(mapRecentStrategies(recent));
-        setRecoveryMessage("Study context is missing. Open a recent strategy or create a new one.");
+        setRecoveryMessage("Study context is missing. Open a recent session or create a new one.");
         setLoading(false);
         return;
       }
@@ -277,7 +309,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       if (!stored) {
         const recent = await listRecentStrategies(user.uid, 5);
         setRecentStrategies(mapRecentStrategies(recent));
-        setRecoveryMessage("This strategy could not be found. Open a recent strategy or create a new one.");
+        setRecoveryMessage("This session could not be found. Open a recent session or create a new one.");
         setLoading(false);
         return;
       }
@@ -289,7 +321,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       if (!selectedTopic) {
         const recent = await listRecentStrategies(user.uid, 5);
         setRecentStrategies(mapRecentStrategies(recent));
-        setRecoveryMessage("This topic is not available in the selected strategy.");
+        setRecoveryMessage("This topic is not available in the selected session.");
         setLoading(false);
         return;
       }
@@ -309,6 +341,23 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         ),
       );
       setRecoveryMessage(null);
+
+      const session = await getStudySessionByStrategyId(user.uid, strategyId);
+      if (session) {
+        const signals = Object.entries(session.data.topicProgress ?? {}).reduce<Record<string, TopicSignal>>(
+          (accumulator, [slug, progress]) => {
+            accumulator[slug] = {
+              confidence: progress.confidence ?? 0,
+              revisitCount: progress.revisitCount ?? 0,
+              skippedCount: progress.skippedCount ?? 0,
+            };
+            return accumulator;
+          },
+          {},
+        );
+        setTopicSignals(signals);
+        setSessionExamDate(session.data.examDate ?? null);
+      }
 
       const allFiles = [
         ...stored.syllabusFiles,
@@ -392,6 +441,24 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     void markTopicLearningInSession(user.uid, strategyId, topic.slug);
   }, [topic, strategyId, user]);
 
+  useEffect(() => {
+    return () => {
+      if (!user || !strategyId || !topic || completed) {
+        return;
+      }
+
+      const openedAt = topicOpenedAtRef.current;
+      if (!openedAt) {
+        return;
+      }
+
+      const elapsedSeconds = Math.max(0, Math.round((Date.now() - openedAt) / 1000));
+      if (elapsedSeconds <= 40) {
+        void markTopicSkippedInSession(user.uid, strategyId, topic.slug);
+      }
+    };
+  }, [completed, strategyId, topic, user]);
+
   const activeChapter = useMemo(() => {
     if (!strategy || !topic) {
       return null;
@@ -410,6 +477,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         nextTopicInChapter: null as StudyTopic | null,
         nextChapterStart: null as StudyTopic | null,
         recommendedNextTopic: null as StudyTopic | null,
+        recommendedReason: "",
       };
     }
 
@@ -443,26 +511,62 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
     const chapterByNumber = new Map(strategy.chapters.map((chapter) => [chapter.chapterNumber, chapter]));
 
-    const recommendedNextTopic = strategy.topics
+    const examDateFactor = (() => {
+      if (!sessionExamDate) {
+        return 0;
+      }
+
+      const examAt = new Date(sessionExamDate).getTime();
+      if (Number.isNaN(examAt)) {
+        return 0;
+      }
+
+      const days = Math.max(0, Math.round((examAt - Date.now()) / (1000 * 60 * 60 * 24)));
+      if (days <= 3) return 22;
+      if (days <= 7) return 14;
+      if (days <= 14) return 8;
+      return 4;
+    })();
+
+    const ranked = strategy.topics
       .filter((candidate) => candidate.slug !== topic.slug)
       .filter((candidate) => !topicStatuses[candidate.slug])
       .map((candidate) => {
         const chapter = candidate.chapterNumber ? chapterByNumber.get(candidate.chapterNumber) : undefined;
+        const signal = topicSignals[candidate.slug];
         const examLikelihood = candidate.examLikelihoodScore ?? 0;
         const chapterWeightage = parseWeightage(chapter?.weightage);
         const unfinishedStatus = topicStatuses[candidate.slug] ? 0 : 18;
+        const lowConfidenceBoost = Math.max(0, 100 - (signal?.confidence ?? 0)) * 0.28;
+        const revisitBoost = (signal?.revisitCount ?? 0) * 5;
+        const skippedBoost = (signal?.skippedCount ?? 0) * 6;
         const score =
           examLikelihood +
           chapterWeightage +
           unfinishedStatus +
           priorityScore(candidate.priority) +
-          timeRemainingFactor(candidate.priority);
+          timeRemainingFactor(candidate.priority) +
+          lowConfidenceBoost +
+          revisitBoost +
+          skippedBoost +
+          examDateFactor;
+
+        const reasons: string[] = [];
+        if (examLikelihood >= 70) reasons.push("high exam probability");
+        if ((signal?.confidence ?? 0) <= 45) reasons.push("low confidence");
+        if ((signal?.revisitCount ?? 0) >= 1) reasons.push("needs revisit");
+        if ((signal?.skippedCount ?? 0) >= 1) reasons.push("recently skipped");
         return {
           candidate,
           score,
+          reason: reasons.length ? reasons.slice(0, 2).join(" + ") : "highest blended score",
         };
       })
-      .sort((a, b) => b.score - a.score)[0]?.candidate ?? null;
+      .sort((a, b) => b.score - a.score);
+
+    const recommended = ranked[0] ?? null;
+    const recommendedNextTopic = recommended?.candidate ?? null;
+    const recommendedReason = recommended ? `Reason: ${recommended.reason}` : "";
 
     const chapterTopics = activeChapter.topics;
     const topicIndex = chapterTopics.findIndex((item) => item.slug === topic.slug);
@@ -478,8 +582,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
             ?.topics[0] ?? null
         : null;
 
-    return { nextTopicInChapter, nextChapterStart, recommendedNextTopic };
-  }, [activeChapter, strategy, topic, topicStatuses]);
+    return { nextTopicInChapter, nextChapterStart, recommendedNextTopic, recommendedReason };
+  }, [activeChapter, sessionExamDate, strategy, topic, topicSignals, topicStatuses]);
 
   const topicProgressLabel = useMemo(() => {
     if (!activeChapter || !topic) {
@@ -494,6 +598,13 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
     return `Topic ${index + 1} / ${chapterTopics.length}`;
   }, [activeChapter, topic]);
+
+  const globalProgress = useMemo(() => {
+    if (!strategy) return { completed: 0, total: 0, percent: 0 };
+    const total = strategy.topics.length;
+    const completed = Object.values(topicStatuses).filter(Boolean).length;
+    return { completed, total, percent: total ? Math.round((completed / total) * 100) : 0 };
+  }, [strategy, topicStatuses]);
 
   async function runQuickAction(action: QuickActionKey) {
     if (!strategyId || !topic || !user) {
@@ -684,6 +795,15 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         markTopicCompletedInSession(user.uid, strategyId, topic.slug, elapsedSeconds, 80),
       ]);
 
+      setTopicSignals((current) => ({
+        ...current,
+        [topic.slug]: {
+          confidence: 80,
+          revisitCount: current[topic.slug]?.revisitCount ?? 0,
+          skippedCount: current[topic.slug]?.skippedCount ?? 0,
+        },
+      }));
+
       setTopicStatuses((current) => ({
         ...current,
         [topic.slug]: true,
@@ -768,15 +888,109 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       const data = (await response.json()) as ExamModeApiResponse;
       setExamMode(data);
+
+      if (user && strategyId && topic) {
+        await recordQuizAttemptInSession(user.uid, strategyId, topic.slug, {
+          score: data.readinessScore,
+          durationSeconds: 120,
+        });
+
+        setTopicSignals((current) => ({
+          ...current,
+          [topic.slug]: {
+            confidence: data.readinessScore,
+            revisitCount: current[topic.slug]?.revisitCount ?? 0,
+            skippedCount: current[topic.slug]?.skippedCount ?? 0,
+          },
+        }));
+      }
     } finally {
       setExamModeLoading(false);
     }
   }
 
+  async function handleGenerateMicroQuiz(key: string) {
+    if (!topic || !contextFiles.length) {
+      return;
+    }
+
+    setMicroQuizzes((current) => ({
+      ...current,
+      [key]: { loading: true },
+    }));
+
+    try {
+      const response = await fetch("/api/study/micro-quiz", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: topic.title,
+          files: contextFiles,
+          count: 4,
+          ...modelPayload,
+        }),
+      });
+
+      if (!response.ok) {
+        setMicroQuizzes((current) => ({
+          ...current,
+          [key]: { loading: false, error: "Unable to generate quiz from uploaded material." },
+        }));
+        return;
+      }
+
+      const data = (await response.json()) as MicroQuizApiResponse;
+      setMicroQuizzes((current) => ({
+        ...current,
+        [key]: {
+          loading: false,
+          questions: data.questions,
+          citations: data.citations,
+        },
+      }));
+    } catch {
+      setMicroQuizzes((current) => ({
+        ...current,
+        [key]: { loading: false, error: "Unable to generate quiz from uploaded material." },
+      }));
+    }
+  }
+
+  async function handleQuizSelfAssessment(key: string, score: number) {
+    if (!user || !strategyId || !topic) {
+      return;
+    }
+
+    await recordQuizAttemptInSession(user.uid, strategyId, topic.slug, {
+      score,
+      durationSeconds: 180,
+    });
+
+    setMicroQuizzes((current) => ({
+      ...current,
+      [key]: {
+        ...current[key],
+        attempted: true,
+        score,
+      },
+    }));
+
+    setTopicSignals((current) => ({
+      ...current,
+      [topic.slug]: {
+        confidence: score,
+        revisitCount: current[topic.slug]?.revisitCount ?? 0,
+        skippedCount: current[topic.slug]?.skippedCount ?? 0,
+      },
+    }));
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#050505] text-white flex items-center justify-center">
-        <p className="text-neutral-400">Loading topic...</p>
+        <TextShimmerWave className="text-sm [--base-color:#a3a3a3] [--base-gradient-color:#ffffff]" duration={1}>
+          Loading topic...
+        </TextShimmerWave>
       </div>
     );
   }
@@ -784,11 +998,11 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   if (!topic || !studyData || !strategy) {
     return (
       <div className="min-h-screen bg-[#050505] text-white selection:bg-indigo-500/30 overflow-hidden relative">
-        <AppTopNav strategyId={strategyId} topicSlug={topicSlug} />
+        <AuthenticatedNavBar strategyId={strategyId} topicSlug={topicSlug} />
         <div className="relative z-10 pt-20">
           <StrategyRecoveryView
             title="Study context missing"
-            message={recoveryMessage ?? "Open a recent strategy or create a new one to continue studying."}
+            message={recoveryMessage ?? "Open a recent session or create a new one to continue studying."}
             recentStrategies={recentStrategies}
             mode="study"
           />
@@ -803,31 +1017,34 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     ? `/study/${nextFlow.nextTopicInChapter.slug}?id=${strategyId}`
     : nextFlow.nextChapterStart
       ? `/study/${nextFlow.nextChapterStart.slug}?id=${strategyId}`
-      : `/strategy?id=${strategyId}`;
+      : `/dashboard?id=${strategyId}`;
   const nextLabel = nextFlow.recommendedNextTopic
     ? "🔥 Recommended Next Topic"
     : nextFlow.nextTopicInChapter
     ? "Continue Chapter"
     : nextFlow.nextChapterStart
       ? "Start Next Chapter"
-      : "Back to Strategy";
+      : "Back to Dashboard";
   const hasNextStep = Boolean(nextFlow.recommendedNextTopic || nextFlow.nextTopicInChapter || nextFlow.nextChapterStart);
+  const nextReason = nextFlow.recommendedReason;
 
   return (
-    <div className="min-h-screen bg-[#050505] text-white selection:bg-indigo-500/30 overflow-hidden relative pb-28">
-      <AppTopNav strategyId={strategyId} topicSlug={topicSlug} />
+    <div className="h-screen bg-[#050505] text-white selection:bg-orange-500/20 overflow-hidden flex flex-col relative">
+      <AuthenticatedNavBar strategyId={strategyId} topicSlug={topicSlug} />
+      <div className="h-20 flex-shrink-0 pointer-events-none" aria-hidden="true" />
 
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <motion.div
           animate={{ scale: [1, 1.2, 1], opacity: [0.15, 0.3, 0.15] }}
           transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
-          className="absolute -top-[10%] -left-[10%] w-[60%] h-[60%] rounded-full bg-indigo-500/20 blur-[120px]"
+          className="absolute -top-[10%] -left-[10%] w-[60%] h-[60%] rounded-full blur-[120px]"
+          style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.15) 0%, transparent 70%)" }}
         />
       </div>
 
-      <div className="relative z-10 mx-auto max-w-[1400px] px-4 md:px-6 pt-24 pb-16 md:pt-28 md:pb-20">
-        <div className="grid grid-cols-1 lg:grid-cols-10 gap-5 items-start">
-          <div className="lg:col-span-7 space-y-5 max-h-[calc(100vh-12rem)] overflow-y-auto pr-1">
+      <div className="relative z-10 flex-1 flex min-h-0 overflow-hidden">
+        <div className="flex flex-1 min-h-0">
+          <div className="flex-1 overflow-y-auto min-w-0 px-4 md:px-8 pt-6 pb-28 space-y-5">
             <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-5 md:p-6">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -873,6 +1090,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                     {studyData.whatToLearn.map((item, index) => {
                       const key = `${item}-${index}`;
                       const learned = learnedItems[key];
+                      const quiz = microQuizzes[key];
 
                       return (
                         <li key={key} className="rounded-xl bg-black/25 border border-white/10 px-3 py-3">
@@ -924,6 +1142,61 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                                   ))}
                                 </div>
                               ) : null}
+
+                              <div className="pt-2 border-t border-white/10">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-xs uppercase tracking-wide text-indigo-200/80">Micro Quiz</p>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    className="rounded-full border-white/10 bg-white/5 text-white hover:bg-white/10"
+                                    disabled={Boolean(quiz?.loading)}
+                                    onClick={() => void handleGenerateMicroQuiz(key)}
+                                  >
+                                    {quiz?.questions?.length ? "Regenerate Quiz" : quiz?.loading ? "Generating..." : "Generate 3-5 Questions"}
+                                  </Button>
+                                </div>
+
+                                {quiz?.error ? <p className="mt-2 text-xs text-red-300">{quiz.error}</p> : null}
+
+                                {quiz?.questions?.length ? (
+                                  <div className="mt-3 space-y-2">
+                                    {quiz.questions.map((question, questionIndex) => (
+                                      <div key={`${question.question}-${questionIndex}`} className="rounded-lg bg-black/35 border border-white/10 p-3">
+                                        <p className="text-sm text-white">Q{questionIndex + 1}. {question.question}</p>
+                                        <p className="text-xs text-indigo-200 mt-2">Answer:</p>
+                                        <MarkdownRenderer content={question.answer} />
+                                        <p className="text-xs text-indigo-200 mt-2">Explanation:</p>
+                                        <MarkdownRenderer content={question.explanation} />
+                                      </div>
+                                    ))}
+
+                                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        className="rounded-full border-red-400/20 bg-red-500/10 text-red-200 hover:bg-red-500/20"
+                                        onClick={() => void handleQuizSelfAssessment(key, 45)}
+                                      >
+                                        I struggled
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        className="rounded-full border-emerald-400/20 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20"
+                                        onClick={() => void handleQuizSelfAssessment(key, 80)}
+                                      >
+                                        I did well
+                                      </Button>
+                                      {quiz.attempted ? (
+                                        <Badge className="bg-indigo-500/20 text-indigo-200 border-none">
+                                          Quiz recorded: {quiz.score}%
+                                        </Badge>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
                             </div>
                           ) : null}
                         </li>
@@ -1136,20 +1409,20 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
             </Card>
           </div>
 
-          <div className="lg:col-span-3 lg:sticky lg:top-6">
-            <Card className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl h-[calc(100vh-10rem)] flex flex-col">
-              <CardHeader>
-                <CardTitle className="text-white text-xl">Ask about this topic</CardTitle>
+          <div className="hidden lg:flex w-[380px] xl:w-[420px] flex-shrink-0 flex-col px-4 pt-4 pb-[68px]">
+            <Card className="flex-1 flex flex-col min-h-0 rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl shadow-2xl overflow-hidden">
+              <CardHeader className="px-5 pt-5 pb-3 flex-shrink-0 border-b border-white/[0.07]">
+                <CardTitle className="text-white text-base font-semibold tracking-tight">Ask about this topic</CardTitle>
               </CardHeader>
-              <CardContent className="flex-1 flex flex-col gap-3 overflow-hidden">
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              <CardContent className="flex-1 flex flex-col gap-3 min-h-0 overflow-hidden px-4 py-4">
+                <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
                   {chatHistory.length ? (
                     chatHistory.map((message) => (
                       <div
                         key={message.id}
                         className={`rounded-xl px-3 py-2 text-sm leading-6 border ${
                           message.role === "user"
-                            ? "bg-indigo-500/20 border-indigo-300/40 text-indigo-50"
+                            ? "bg-orange-500/15 border-orange-400/25 text-orange-50"
                             : "bg-black/25 border-white/10 text-neutral-100"
                         }`}
                       >
@@ -1175,9 +1448,10 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                   ) : (
                     <p className="text-sm text-neutral-400">Ask a question and get concise, topic-specific answers.</p>
                   )}
+                  <div ref={chatEndRef} />
                 </div>
 
-                <div className="pt-1">
+                <div className="pt-1 pb-1">
                   <AnimatedGlowingBorder className="w-full h-[62px]" innerClassName="h-full bg-[#010201]">
                     <AIInputWithLoading
                       id="study-topic-chat"
@@ -1203,30 +1477,47 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-white/10 bg-black/70 backdrop-blur-xl">
         <div className="mx-auto max-w-[1400px] px-4 md:px-6 py-3 flex items-center justify-between gap-3">
-          <Button asChild variant="outline" className="rounded-full border-white/10 bg-white/5 text-white hover:bg-white/10">
-            <Link href={`/strategy?id=${strategyId}`}>Back to Strategy</Link>
+          <Button asChild variant="outline" className="rounded-full border-white/10 bg-white/5 text-white hover:bg-white/10 hover:border-white/20 transition-all">
+            <Link href={`/dashboard?id=${strategyId}`}>Back to Dashboard</Link>
           </Button>
 
-          <div className="hidden md:flex items-center">
-            {topicProgressLabel ? (
-              <span className="text-xs md:text-sm text-neutral-300 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
-                {topicProgressLabel}
-              </span>
-            ) : null}
+          <div className="hidden md:flex items-center gap-3">
+            {/* Visual session progress strip */}
+            <div className="flex flex-col items-center gap-1">
+              <div className="w-32 h-1.5 rounded-full bg-white/10 overflow-hidden">
+                <div
+                  className="h-full bg-orange-500 transition-all duration-500"
+                  style={{ width: `${globalProgress.percent}%` }}
+                />
+              </div>
+              <span className="text-[10px] text-neutral-400">{globalProgress.completed}/{globalProgress.total} topics</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {topicProgressLabel ? (
+                <span className="text-xs md:text-sm text-neutral-300 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+                  {topicProgressLabel}
+                </span>
+              ) : null}
+              {nextReason ? (
+                <span className="text-xs text-neutral-300 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+                  {nextReason}
+                </span>
+              ) : null}
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
             <Button
               type="button"
               onClick={handleMarkCompleted}
-              className="rounded-full bg-emerald-500 text-emerald-950 hover:bg-emerald-400"
+              className="rounded-full bg-orange-500 hover:bg-orange-400 text-white shadow-[0_0_16px_rgba(249,115,22,0.2)] hover:shadow-[0_0_24px_rgba(249,115,22,0.35)] transition-all"
               disabled={completed}
             >
               {completed ? "Completed" : "Mark as Completed"}
             </Button>
             <Button
               asChild
-              className="rounded-full bg-white text-black hover:bg-neutral-200"
+              className="rounded-full bg-white hover:bg-neutral-100 text-[#080808] shadow-[0_2px_16px_rgba(255,255,255,0.12)] transition-all"
               disabled={!hasNextStep}
             >
               <Link href={nextHref}>

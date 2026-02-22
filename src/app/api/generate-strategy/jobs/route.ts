@@ -16,7 +16,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing userId" }, { status: 400 });
     }
 
-    const job = createStrategyJob(body.userId, {
+    const job = await createStrategyJob(body.userId, {
       hoursLeft: body.hoursLeft,
       syllabusFiles: body.syllabusFiles ?? [],
       syllabusTextInput: body.syllabusTextInput ?? "",
@@ -39,12 +39,13 @@ export async function POST(request: Request) {
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const jobId = searchParams.get("id");
+  const userId = searchParams.get("userId");
 
-  if (!jobId) {
-    return NextResponse.json({ error: "Missing job id" }, { status: 400 });
+  if (!jobId || !userId?.trim()) {
+    return NextResponse.json({ error: "Missing job id or userId" }, { status: 400 });
   }
 
-  const job = getStrategyJob(jobId);
+  const job = await getStrategyJob(userId, jobId);
   if (!job) {
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }

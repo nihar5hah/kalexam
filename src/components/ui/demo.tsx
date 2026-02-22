@@ -4,6 +4,8 @@ import React from "react";
 import { Home, MessageSquare, User } from "lucide-react";
 
 import { FloatingNav } from "@/components/ui/floating-navbar";
+import { NotFound } from "@/components/ui/not-found-2";
+import { TextShimmerWave } from "@/components/ui/text-shimmer-wave";
 
 export function FloatingNavDemo() {
   const navItems = [
@@ -49,3 +51,15 @@ const DemoOne = () => {
 };
 
 export { DemoOne };
+
+export function TextShimmerWaveBasic() {
+  return (
+    <TextShimmerWave className="font-mono text-sm" duration={1}>
+      Generating code...
+    </TextShimmerWave>
+  );
+}
+
+export function NotFoundDemo() {
+  return <NotFound />;
+}
