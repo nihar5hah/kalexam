@@ -68,6 +68,30 @@ export type StudySession = {
       }>;
     }
   >;
+  studyAnswerCache: Record<
+    string,
+    {
+      signature: string;
+      schemaVersion: string;
+      generatedAt: string;
+      model: string;
+      item: string;
+      answer: {
+        conceptExplanation: string;
+        example: string;
+        examTip: string;
+        typicalExamQuestion: string;
+        fullAnswer: string;
+        confidence: "high" | "medium" | "low";
+        citations: Array<{
+          sourceType: string;
+          sourceName: string;
+          sourceYear?: string;
+          importanceLevel: string;
+        }>;
+      };
+    }
+  >;
   createdAt: Timestamp;
   updatedAt: Timestamp;
   progress: {
@@ -102,6 +126,32 @@ export type StudySession = {
   >;
   lastOpenedAt?: Timestamp;
   deletedAt?: Timestamp;
+  aiTelemetry?: {
+    events: Array<{
+      timestamp: string;
+      taskType: string;
+      modelUsed: string;
+      latencyMs: number;
+      cacheHit: boolean;
+      fallbackTriggered: boolean;
+      fallbackReason?: string;
+    }>;
+    summary?: {
+      totalCalls: number;
+      cacheHits: number;
+      fallbackCalls: number;
+      averageLatencyMs: number;
+    };
+  };
+};
+
+export type AiTelemetryEvent = {
+  taskType: string;
+  modelUsed: string;
+  latencyMs: number;
+  cacheHit: boolean;
+  fallbackTriggered: boolean;
+  fallbackReason?: string;
 };
 
 type CreateStudySessionInput = {
@@ -221,6 +271,7 @@ export async function createStudySession(input: CreateStudySessionInput): Promis
     generatedStrategy: input.generatedStrategy,
     studyContent: {},
     chatCache: {},
+    studyAnswerCache: {},
     progress: toProgress(input.generatedStrategy),
     readinessScore: initialReadiness,
     examReadinessTimeline: [{ timestamp: new Date().toISOString(), score: initialReadiness }],
@@ -586,6 +637,7 @@ export async function getChatCacheFromSession(
     answer: entry.answer,
     confidence: entry.confidence,
     citations: entry.citations,
+    model: entry.model,
   };
 }
 
@@ -623,6 +675,129 @@ export async function saveChatCacheToSession(
       answer: payload.answer,
       confidence: payload.confidence,
       citations: payload.citations,
+    }),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function getStudyAnswerCacheFromSession(
+  userId: string,
+  strategyId: string,
+  cacheKey: string,
+  signature: string,
+  schemaVersion: string,
+) {
+  const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
+  if (!sessionRef) {
+    return null;
+  }
+
+  const sessionDoc = await getDoc(sessionRef);
+  const data = sessionDoc.data() as StudySession | undefined;
+  const key = normalizeCacheKey(cacheKey);
+  const entry = data?.studyAnswerCache?.[key];
+
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.signature !== signature || entry.schemaVersion !== schemaVersion) {
+    return null;
+  }
+
+  return {
+    ...entry.answer,
+    model: entry.model,
+  };
+}
+
+export async function saveStudyAnswerCacheToSession(
+  userId: string,
+  strategyId: string,
+  cacheKey: string,
+  payload: {
+    signature: string;
+    schemaVersion: string;
+    model: string;
+    item: string;
+    answer: {
+      conceptExplanation: string;
+      example: string;
+      examTip: string;
+      typicalExamQuestion: string;
+      fullAnswer: string;
+      confidence: "high" | "medium" | "low";
+      citations: Array<{
+        sourceType: string;
+        sourceName: string;
+        sourceYear?: string;
+        importanceLevel: string;
+      }>;
+    };
+  },
+) {
+  const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
+  if (!sessionRef) {
+    return;
+  }
+
+  const key = normalizeCacheKey(cacheKey);
+  await updateDoc(sessionRef, {
+    [`studyAnswerCache.${key}`]: sanitizeForFirestore({
+      signature: payload.signature,
+      schemaVersion: payload.schemaVersion,
+      generatedAt: new Date().toISOString(),
+      model: payload.model,
+      item: payload.item,
+      answer: payload.answer,
+    }),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function recordAiTelemetryInSession(
+  userId: string,
+  strategyId: string,
+  event: AiTelemetryEvent,
+) {
+  const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
+  if (!sessionRef) {
+    return;
+  }
+
+  const sessionDoc = await getDoc(sessionRef);
+  const data = sessionDoc.data() as StudySession | undefined;
+  const existingEvents = data?.aiTelemetry?.events ?? [];
+
+  const nextEvents = [
+    ...existingEvents,
+    {
+      timestamp: new Date().toISOString(),
+      taskType: event.taskType,
+      modelUsed: event.modelUsed,
+      latencyMs: Math.max(0, Math.round(event.latencyMs)),
+      cacheHit: Boolean(event.cacheHit),
+      fallbackTriggered: Boolean(event.fallbackTriggered),
+      fallbackReason: event.fallbackReason,
+    },
+  ].slice(-150);
+
+  const totalCalls = nextEvents.length;
+  const cacheHits = nextEvents.filter((item) => item.cacheHit).length;
+  const fallbackCalls = nextEvents.filter((item) => item.fallbackTriggered).length;
+  const averageLatencyMs = totalCalls
+    ? Math.round(nextEvents.reduce((sum, item) => sum + (item.latencyMs || 0), 0) / totalCalls)
+    : 0;
+
+  await updateDoc(sessionRef, {
+    aiTelemetry: sanitizeForFirestore({
+      events: nextEvents,
+      summary: {
+        totalCalls,
+        cacheHits,
+        fallbackCalls,
+        averageLatencyMs,
+      },
     }),
     updatedAt: serverTimestamp(),
   });

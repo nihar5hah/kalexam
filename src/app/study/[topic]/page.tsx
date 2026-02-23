@@ -32,12 +32,15 @@ import {
   saveStudyTopicCache,
 } from "@/lib/firestore/strategies";
 import {
+  getStudyAnswerCacheFromSession,
   getStudySessionByStrategyId,
   getChatCacheFromSession,
   markTopicCompletedInSession,
   markTopicLearningInSession,
   markTopicSkippedInSession,
+  recordAiTelemetryInSession,
   recordQuizAttemptInSession,
+  saveStudyAnswerCacheToSession,
   saveChatCacheToSession,
 } from "@/lib/firestore/study-sessions";
 import { FALLBACK_MESSAGE } from "@/lib/study/constants";
@@ -84,12 +87,26 @@ type TopicStudyApiResponse = {
   sourceRefs?: SourceCitation[];
   materialCoverage?: number;
   lowMaterialConfidence?: boolean;
+  routingMeta?: {
+    taskType: string;
+    modelUsed: string;
+    fallbackTriggered: boolean;
+    fallbackReason?: string;
+    latencyMs: number;
+  };
 };
 
 type TopicAskApiResponse = {
   answer: string;
   confidence: TopicConfidence;
   citations?: SourceCitation[];
+  routingMeta?: {
+    taskType: string;
+    modelUsed: string;
+    fallbackTriggered: boolean;
+    fallbackReason?: string;
+    latencyMs: number;
+  };
 };
 
 type LearnItemApiResponse = {
@@ -100,6 +117,13 @@ type LearnItemApiResponse = {
   fullAnswer: string;
   confidence: TopicConfidence;
   citations: SourceCitation[];
+  routingMeta?: {
+    taskType: string;
+    modelUsed: string;
+    fallbackTriggered: boolean;
+    fallbackReason?: string;
+    latencyMs: number;
+  };
 };
 
 type MicroQuizQuestion = {
@@ -112,6 +136,13 @@ type MicroQuizQuestion = {
 type MicroQuizApiResponse = {
   questions: MicroQuizQuestion[];
   citations: SourceCitation[];
+  routingMeta?: {
+    taskType: string;
+    modelUsed: string;
+    fallbackTriggered: boolean;
+    fallbackReason?: string;
+    latencyMs: number;
+  };
 };
 
 type ExamModeApiResponse = {
@@ -126,6 +157,13 @@ type ExamModeApiResponse = {
   weakAreas: string[];
   examTip: string;
   citations: SourceCitation[];
+  routingMeta?: {
+    taskType: string;
+    modelUsed: string;
+    fallbackTriggered: boolean;
+    fallbackReason?: string;
+    latencyMs: number;
+  };
 };
 
 type ChatMessage = {
@@ -205,6 +243,25 @@ function getSessionModel(strategyId: string, fallbackModelType: "gemini" | "cust
   }
 
   return { modelType: "gemini" };
+}
+
+function formatExamTimeRemaining(examDate: string | null, fallbackHours: number | undefined): string {
+  if (examDate) {
+    const examAt = new Date(examDate).getTime();
+    if (!Number.isNaN(examAt)) {
+      const hours = Math.max(0, Math.round((examAt - Date.now()) / (1000 * 60 * 60)));
+      if (hours <= 48) {
+        return `${hours}h`;
+      }
+      return `${Math.round(hours / 24)}d`;
+    }
+  }
+
+  if (typeof fallbackHours === "number" && Number.isFinite(fallbackHours)) {
+    return `${Math.max(0, Math.round(fallbackHours))}h`;
+  }
+
+  return "unknown";
 }
 
 export default function StudyTopicPage() {
@@ -377,9 +434,25 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       if (cached) {
         setStudyData(cached);
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: "topic_description",
+          modelUsed: "cache",
+          latencyMs: 0,
+          cacheHit: true,
+          fallbackTriggered: false,
+        });
         setLoading(false);
         return;
       }
+
+      const strategyHoursLeft =
+        "strategySummary" in stored.strategy
+          ? stored.strategy.strategySummary?.hoursLeft
+          : undefined;
+      const examTimeRemaining = formatExamTimeRemaining(
+        session?.data.examDate ?? null,
+        strategyHoursLeft,
+      );
 
       const response = await fetch("/api/study/topic", {
         method: "POST",
@@ -389,6 +462,11 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           priority: selectedTopic.priority,
           outlineOnly: false,
           files: allFiles,
+          currentChapter: selectedTopic.chapterTitle,
+          examTimeRemaining,
+          studyMode: "learn",
+          examMode: false,
+          userIntent: "topic overview and exam-focused summary",
           ...resolvedModel,
         }),
       });
@@ -415,6 +493,16 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       const apiData = (await response.json()) as TopicStudyApiResponse;
       setStudyData(apiData);
+      if (apiData.routingMeta) {
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: apiData.routingMeta.taskType,
+          modelUsed: apiData.routingMeta.modelUsed,
+          latencyMs: apiData.routingMeta.latencyMs,
+          cacheHit: false,
+          fallbackTriggered: apiData.routingMeta.fallbackTriggered,
+          fallbackReason: apiData.routingMeta.fallbackReason,
+        });
+      }
       setLoading(false);
 
       try {
@@ -636,6 +724,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     }
 
     try {
+      const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -644,6 +733,11 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           question: actionPrompt[action],
           files: [...stored.syllabusFiles, ...stored.studyMaterialFiles, ...stored.previousPaperFiles],
           history: [],
+          currentChapter: activeChapter?.chapterTitle ?? topic.chapterTitle,
+          examTimeRemaining,
+          studyMode: "quick_action",
+          examMode: false,
+          userIntent: action,
           ...modelPayload,
         }),
       });
@@ -657,6 +751,16 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       }
 
       const data = (await response.json()) as TopicAskApiResponse;
+      if (data.routingMeta) {
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: data.routingMeta.taskType,
+          modelUsed: data.routingMeta.modelUsed,
+          latencyMs: data.routingMeta.latencyMs,
+          cacheHit: false,
+          fallbackTriggered: data.routingMeta.fallbackTriggered,
+          fallbackReason: data.routingMeta.fallbackReason,
+        });
+      }
       setQuickActions((current) => ({
         ...current,
         [action]: {
@@ -725,11 +829,19 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           citations: cachedChat.citations as SourceCitation[],
         },
       ]);
+      void recordAiTelemetryInSession(user.uid, strategyId, {
+        taskType: "chat_follow_up",
+        modelUsed: cachedChat.model ?? "cache",
+        latencyMs: 0,
+        cacheHit: true,
+        fallbackTriggered: false,
+      });
       setAsking(false);
       return;
     }
 
     try {
+      const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -740,6 +852,11 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           history: [...chatHistory, userMessage]
             .slice(-8)
             .map((message) => ({ role: message.role, content: message.content })),
+          currentChapter: activeChapter?.chapterTitle ?? topic.chapterTitle,
+          examTimeRemaining,
+          studyMode: "chat",
+          examMode: false,
+          userIntent: resolvedQuestion,
           ...modelPayload,
         }),
       });
@@ -753,6 +870,16 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       }
 
       const data = (await response.json()) as TopicAskApiResponse;
+      if (data.routingMeta) {
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: data.routingMeta.taskType,
+          modelUsed: data.routingMeta.modelUsed,
+          latencyMs: data.routingMeta.latencyMs,
+          cacheHit: false,
+          fallbackTriggered: data.routingMeta.fallbackTriggered,
+          fallbackReason: data.routingMeta.fallbackReason,
+        });
+      }
 
       void saveChatCacheToSession(user.uid, strategyId, cacheKey, {
         signature: fileSignature,
@@ -768,16 +895,49 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         })),
       });
 
+      const fullAnswer = data.answer?.trim() ? data.answer : FALLBACK_MESSAGE;
+      const assistantId = `${Date.now()}-assistant`;
+
       setChatHistory((current) => [
         ...current,
         {
-          id: `${Date.now()}-assistant`,
+          id: assistantId,
           role: "assistant",
-          content: data.answer,
+          content: "",
           confidence: data.confidence,
           citations: data.citations ?? [],
         },
       ]);
+
+      const chunkSize = Math.max(8, Math.min(28, Math.ceil(fullAnswer.length / 22)));
+      for (let cursor = chunkSize; cursor < fullAnswer.length; cursor += chunkSize) {
+        await new Promise<void>((resolve) => {
+          setTimeout(() => resolve(), 14);
+        });
+
+        const partial = fullAnswer.slice(0, cursor);
+        setChatHistory((current) =>
+          current.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  content: partial,
+                }
+              : message,
+          ),
+        );
+      }
+
+      setChatHistory((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content: fullAnswer,
+              }
+            : message,
+        ),
+      );
     } finally {
       setAsking(false);
     }
@@ -816,7 +976,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   }
 
   async function handleLearnNow(item: string, index: number) {
-    if (!topic || !contextFiles.length) {
+    if (!topic || !contextFiles.length || !user || !strategyId) {
       return;
     }
 
@@ -831,6 +991,43 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     }));
 
     try {
+      const signature = `${STUDY_CACHE_SCHEMA_VERSION}:${contextFiles.map((file) => file.url).join("|")}`;
+      const answerCacheKey = `${topic.slug}:${item}`;
+      const cachedLearnAnswer = await getStudyAnswerCacheFromSession(
+        user.uid,
+        strategyId,
+        answerCacheKey,
+        signature,
+        STUDY_CACHE_SCHEMA_VERSION,
+      );
+
+      if (cachedLearnAnswer) {
+        setLearnedItems((current) => ({
+          ...current,
+          [key]: {
+            loading: false,
+            content: {
+              conceptExplanation: cachedLearnAnswer.conceptExplanation,
+              example: cachedLearnAnswer.example,
+              examTip: cachedLearnAnswer.examTip,
+              typicalExamQuestion: cachedLearnAnswer.typicalExamQuestion,
+              fullAnswer: cachedLearnAnswer.fullAnswer,
+              confidence: cachedLearnAnswer.confidence,
+              citations: cachedLearnAnswer.citations as SourceCitation[],
+            },
+          },
+        }));
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: "learn_now_answer",
+          modelUsed: cachedLearnAnswer.model ?? "cache",
+          latencyMs: 0,
+          cacheHit: true,
+          fallbackTriggered: false,
+        });
+        return;
+      }
+
+      const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/learn-item", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -838,6 +1035,11 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           topic: topic.title,
           item,
           files: contextFiles,
+          currentChapter: activeChapter?.chapterTitle ?? topic.chapterTitle,
+          examTimeRemaining,
+          studyMode: "learn_now",
+          examMode: false,
+          userIntent: item,
           ...modelPayload,
         }),
       });
@@ -851,6 +1053,36 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       }
 
       const content = (await response.json()) as LearnItemApiResponse;
+      void saveStudyAnswerCacheToSession(user.uid, strategyId, answerCacheKey, {
+        signature,
+        schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
+        model: content.routingMeta?.modelUsed ?? getModelCacheKey(modelPayload),
+        item,
+        answer: {
+          conceptExplanation: content.conceptExplanation,
+          example: content.example,
+          examTip: content.examTip,
+          typicalExamQuestion: content.typicalExamQuestion,
+          fullAnswer: content.fullAnswer,
+          confidence: content.confidence,
+          citations: (content.citations ?? []).map((citation) => ({
+            sourceType: citation.sourceType,
+            sourceName: citation.sourceName,
+            sourceYear: citation.sourceYear,
+            importanceLevel: citation.importanceLevel,
+          })),
+        },
+      });
+      if (content.routingMeta && user && strategyId) {
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: content.routingMeta.taskType,
+          modelUsed: content.routingMeta.modelUsed,
+          latencyMs: content.routingMeta.latencyMs,
+          cacheHit: false,
+          fallbackTriggered: content.routingMeta.fallbackTriggered,
+          fallbackReason: content.routingMeta.fallbackReason,
+        });
+      }
       setLearnedItems((current) => ({
         ...current,
         [key]: { loading: false, content },
@@ -871,12 +1103,18 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     setExamModeLoading(true);
 
     try {
+      const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/exam-mode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           topic: topic.title,
           files: contextFiles,
+          currentChapter: activeChapter?.chapterTitle ?? topic.chapterTitle,
+          examTimeRemaining,
+          studyMode: "exam_mode",
+          examMode: true,
+          userIntent: "generate likely exam questions",
           ...modelPayload,
         }),
       });
@@ -888,6 +1126,16 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       const data = (await response.json()) as ExamModeApiResponse;
       setExamMode(data);
+      if (data.routingMeta && user && strategyId) {
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: data.routingMeta.taskType,
+          modelUsed: data.routingMeta.modelUsed,
+          latencyMs: data.routingMeta.latencyMs,
+          cacheHit: false,
+          fallbackTriggered: data.routingMeta.fallbackTriggered,
+          fallbackReason: data.routingMeta.fallbackReason,
+        });
+      }
 
       if (user && strategyId && topic) {
         await recordQuizAttemptInSession(user.uid, strategyId, topic.slug, {
@@ -920,6 +1168,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     }));
 
     try {
+      const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/micro-quiz", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -927,6 +1176,11 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           topic: topic.title,
           files: contextFiles,
           count: 4,
+          currentChapter: activeChapter?.chapterTitle ?? topic.chapterTitle,
+          examTimeRemaining,
+          studyMode: "micro_quiz",
+          examMode: false,
+          userIntent: "generate short quiz",
           ...modelPayload,
         }),
       });
@@ -940,6 +1194,16 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       }
 
       const data = (await response.json()) as MicroQuizApiResponse;
+      if (data.routingMeta && user && strategyId) {
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: data.routingMeta.taskType,
+          modelUsed: data.routingMeta.modelUsed,
+          latencyMs: data.routingMeta.latencyMs,
+          cacheHit: false,
+          fallbackTriggered: data.routingMeta.fallbackTriggered,
+          fallbackReason: data.routingMeta.fallbackReason,
+        });
+      }
       setMicroQuizzes((current) => ({
         ...current,
         [key]: {

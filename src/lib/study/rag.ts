@@ -6,8 +6,11 @@ import {
   TopicPriority,
   UploadedFile,
 } from "@/lib/ai/types";
-import { generateWithCustomProvider } from "@/lib/ai/providers/custom";
-import { generateWithGemini } from "@/lib/ai/providers/gemini";
+import {
+  AiTaskType,
+  RoutingMeta,
+  generateWithModelRouter,
+} from "@/lib/ai/modelRouter";
 import { parseUploadedFiles } from "@/lib/parsing";
 import { ParsedSourceChunk } from "@/lib/parsing/types";
 import { computeExamLikelihood, examLikelihoodLabel } from "@/lib/study/exam-likelihood";
@@ -65,12 +68,14 @@ export type TopicStudyContent = {
   sourceRefs: SourceCitation[];
   materialCoverage: number;
   lowMaterialConfidence: boolean;
+  routingMeta?: RoutingMeta;
 };
 
 export type TopicAnswer = {
   answer: string;
   confidence: TopicConfidence;
   citations: SourceCitation[];
+  routingMeta?: RoutingMeta;
 };
 
 export type LearnItemContent = {
@@ -81,6 +86,7 @@ export type LearnItemContent = {
   fullAnswer: string;
   confidence: TopicConfidence;
   citations: SourceCitation[];
+  routingMeta?: RoutingMeta;
 };
 
 export type ExamModeContent = {
@@ -95,6 +101,7 @@ export type ExamModeContent = {
   weakAreas: string[];
   examTip: string;
   citations: SourceCitation[];
+  routingMeta?: RoutingMeta;
 };
 
 export type MicroQuizQuestion = {
@@ -102,6 +109,20 @@ export type MicroQuizQuestion = {
   answer: string;
   explanation: string;
   difficulty: "easy" | "medium" | "hard";
+};
+
+export type MicroQuizContent = {
+  questions: MicroQuizQuestion[];
+  citations: SourceCitation[];
+  routingMeta?: RoutingMeta;
+};
+
+export type StudyGenerationContext = {
+  currentChapter?: string;
+  examTimeRemaining?: string;
+  studyMode?: string;
+  examMode?: boolean;
+  userIntent?: string;
 };
 
 function tokenize(text: string): string[] {
@@ -112,12 +133,39 @@ function tokenize(text: string): string[] {
     .filter((word) => word.length > 2 && !STOP_WORDS.has(word));
 }
 
-function toModelPrompt(modelConfig: ModelConfig, prompt: string): Promise<string> {
-  if (modelConfig.modelType === "custom") {
-    return generateWithCustomProvider(prompt, modelConfig.config);
+function toModelPrompt(
+  taskType: AiTaskType,
+  modelConfig: ModelConfig,
+  prompt: string,
+  qualitySignals?: {
+    retrievalConfidence?: TopicConfidence;
+    minChars?: number;
+    requiresJson?: boolean;
+  },
+  complexityScore?: number,
+) {
+  return generateWithModelRouter({
+    taskType,
+    modelConfig,
+    prompt,
+    complexityScore,
+    qualitySignals,
+  });
+}
+
+function buildContextEnvelope(context?: StudyGenerationContext): string[] {
+  if (!context) {
+    return [];
   }
 
-  return generateWithGemini(prompt);
+  return [
+    "Generation context:",
+    `- currentChapter: ${context.currentChapter ?? "unknown"}`,
+    `- examTimeRemaining: ${context.examTimeRemaining ?? "unknown"}`,
+    `- studyMode: ${context.studyMode ?? "learn"}`,
+    `- examMode: ${context.examMode ? "on" : "off"}`,
+    `- userIntent: ${context.userIntent ?? "general"}`,
+  ];
 }
 
 function scoreChunk(chunk: string, tokens: string[]): number {
@@ -503,7 +551,7 @@ export async function buildTopicStudyContent(
   topic: string,
   priority: TopicPriority,
   modelConfig: ModelConfig,
-  options?: { outlineOnly?: boolean }
+  options?: { outlineOnly?: boolean; context?: StudyGenerationContext }
 ): Promise<TopicStudyContent> {
   const retrieval = await getTopChunks(files, topic, 6);
   const confidence = toConfidence(retrieval.score);
@@ -531,6 +579,12 @@ export async function buildTopicStudyContent(
       sourceRefs: [],
       materialCoverage: retrieval.materialCoverage,
       lowMaterialConfidence: true,
+      routingMeta: {
+        taskType: "topic_description",
+        modelUsed: "cache-none",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 
@@ -550,13 +604,24 @@ export async function buildTopicStudyContent(
     "Return ONLY valid JSON with this exact shape:",
     '{ "whatToLearn": string[], "explanation": { "concept": string, "simpleExplanation": string, "example": string, "examTip": string }, "keyExamPoints": string[] }',
     `Topic: ${topic}`,
+    ...buildContextEnvelope(options?.context),
     "Context:",
     cleanedContext,
   ].join("\n");
 
   try {
-    const generated = await toModelPrompt(modelConfig, prompt);
-    const parsed = parseJsonObject(generated);
+    const generated = await toModelPrompt(
+      "topic_description",
+      modelConfig,
+      prompt,
+      {
+        requiresJson: true,
+        minChars: options?.outlineOnly ? 120 : 220,
+        retrievalConfidence: confidence,
+      },
+      0.45,
+    );
+    const parsed = parseJsonObject(generated.text);
 
     const strictNormalized = normalizeStudyContent(
       parsed,
@@ -609,6 +674,7 @@ export async function buildTopicStudyContent(
         originalQuestion: previousOriginalQuestion,
       },
     ];
+    strictNormalized.routingMeta = generated.meta;
 
     return strictNormalized;
   } catch {
@@ -650,6 +716,12 @@ export async function buildTopicStudyContent(
       sourceRefs: retrieval.citations,
       materialCoverage: retrieval.materialCoverage,
       lowMaterialConfidence: retrieval.materialCoverage < 40,
+      routingMeta: {
+        taskType: "topic_description",
+        modelUsed: "fallback",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 }
@@ -659,6 +731,7 @@ export async function buildLearnItemContent(
   topic: string,
   item: string,
   modelConfig: ModelConfig,
+  generationContext?: StudyGenerationContext,
 ): Promise<LearnItemContent> {
   const retrieval = await getTopChunks(files, `${topic} ${item}`, 5);
   const confidence = toConfidence(retrieval.score);
@@ -672,6 +745,12 @@ export async function buildLearnItemContent(
       fullAnswer: "Not found in uploaded material.",
       confidence: "low",
       citations: [],
+      routingMeta: {
+        taskType: "learn_now_answer",
+        modelUsed: "cache-none",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 
@@ -684,13 +763,24 @@ export async function buildLearnItemContent(
     "Keep content medium length and structured with short sections and bullet points.",
     `Topic: ${topic}`,
     `Learning item: ${item}`,
+    ...buildContextEnvelope(generationContext),
     "Context:",
     context,
   ].join("\n");
 
   try {
-    const generated = await toModelPrompt(modelConfig, prompt);
-    const parsed = parseJsonObject(generated);
+    const generated = await toModelPrompt(
+      "learn_now_answer",
+      modelConfig,
+      prompt,
+      {
+        requiresJson: true,
+        minChars: 180,
+        retrievalConfidence: confidence,
+      },
+      0.35,
+    );
+    const parsed = parseJsonObject(generated.text);
     return {
       conceptExplanation:
         typeof parsed?.conceptExplanation === "string" && parsed.conceptExplanation.trim()
@@ -714,6 +804,7 @@ export async function buildLearnItemContent(
           : "Not found in uploaded material.",
       confidence,
       citations: retrieval.citations,
+      routingMeta: generated.meta,
     };
   } catch {
     return {
@@ -724,6 +815,12 @@ export async function buildLearnItemContent(
       fullAnswer: "Not found in uploaded material.",
       confidence,
       citations: retrieval.citations,
+      routingMeta: {
+        taskType: "learn_now_answer",
+        modelUsed: "fallback",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 }
@@ -733,7 +830,8 @@ export async function answerTopicQuestion(
   topic: string,
   question: string,
   modelConfig: ModelConfig,
-  history: Array<{ role: "user" | "assistant"; content: string }> = []
+  history: Array<{ role: "user" | "assistant"; content: string }> = [],
+  generationContext?: StudyGenerationContext,
 ): Promise<TopicAnswer> {
   const retrieval = await getTopChunks(files, `${topic} ${question}`, 5);
   const confidence = toConfidence(retrieval.score);
@@ -743,6 +841,12 @@ export async function answerTopicQuestion(
       answer: FALLBACK_MESSAGE,
       confidence: "low",
       citations: [],
+      routingMeta: {
+        taskType: "chat_follow_up",
+        modelUsed: "cache-none",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 
@@ -751,12 +855,15 @@ export async function answerTopicQuestion(
 
   const prompt = [
     "You are an exam tutor.",
-    "Answer only the asked question using the provided context.",
-    "Do not dump raw context.",
-    "Keep answer concise: 4 to 6 sentences maximum.",
-    "If answer is not present in context, reply exactly: Not found in uploaded material.",
+    "Answer the question using this priority:",
+    "1) Use uploaded material first.",
+    "2) If not directly found, provide a short relevant educational explanation.",
+    '3) If using broader explanation, start with exactly: "Not directly found in your material, but relevant:"',
+    "Never invent exam facts that are not supported by context.",
+    "Keep answer concise: 4 to 7 sentences maximum.",
     `Topic: ${topic}`,
     `Question: ${question}`,
+    ...buildContextEnvelope(generationContext),
     "Recent chat context:",
     recentTurns || "None",
     "Retrieved context:",
@@ -764,8 +871,17 @@ export async function answerTopicQuestion(
   ].join("\n");
 
   try {
-    const response = await toModelPrompt(modelConfig, prompt);
-    const answerText = response
+    const response = await toModelPrompt(
+      "chat_follow_up",
+      modelConfig,
+      prompt,
+      {
+        minChars: 90,
+        retrievalConfidence: confidence,
+      },
+      0.3,
+    );
+    const answerText = response.text
       .replace(/^```[\s\S]*?\n/, "")
       .replace(/```$/, "")
       .trim();
@@ -775,16 +891,31 @@ export async function answerTopicQuestion(
         answer: FALLBACK_MESSAGE,
         confidence: "low",
         citations: [],
+        routingMeta: response.meta,
       };
     }
 
     const queryTokens = tokenize(`${topic} ${question}`);
     const isGrounded = hasTokenMatch(answerText, queryTokens);
     if (!isGrounded) {
+      if (retrieval.score >= 8) {
+        const normalized = answerText.startsWith("Not directly found in your material, but relevant:")
+          ? answerText
+          : `Not directly found in your material, but relevant:\n\n${answerText}`;
+
+        return {
+          answer: normalized,
+          confidence: confidence === "high" ? "medium" : "low",
+          citations: retrieval.citations,
+          routingMeta: response.meta,
+        };
+      }
+
       return {
         answer: "Not found in uploaded material.",
         confidence: "low",
         citations: retrieval.citations,
+        routingMeta: response.meta,
       };
     }
 
@@ -792,6 +923,7 @@ export async function answerTopicQuestion(
       answer: answerText,
       confidence,
       citations: retrieval.citations,
+      routingMeta: response.meta,
     };
   } catch {
     const fallbackAnswer = "Not found in uploaded material.";
@@ -799,6 +931,12 @@ export async function answerTopicQuestion(
       answer: fallbackAnswer || FALLBACK_MESSAGE,
       confidence: "low",
       citations: retrieval.citations,
+      routingMeta: {
+        taskType: "chat_follow_up",
+        modelUsed: "fallback",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 }
@@ -807,6 +945,7 @@ export async function buildExamModeContent(
   files: UploadedFile[],
   topic: string,
   modelConfig: ModelConfig,
+  generationContext?: StudyGenerationContext,
 ): Promise<ExamModeContent> {
   const retrieval = await getTopChunks(files, `${topic} likely exam questions`, 6);
   const confidence = toConfidence(retrieval.score);
@@ -826,6 +965,12 @@ export async function buildExamModeContent(
       weakAreas: ["Insufficient uploaded material for this topic."],
       examTip: "Upload more topic-relevant notes and previous papers to improve readiness score.",
       citations: [],
+      routingMeta: {
+        taskType: "exam_mode_generation",
+        modelUsed: "cache-none",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 
@@ -838,13 +983,24 @@ export async function buildExamModeContent(
     "Generate 3 likely exam questions and concise expected answers.",
     "readinessScore must be 0-100.",
     `Topic: ${topic}`,
+    ...buildContextEnvelope(generationContext),
     "Context:",
     context,
   ].join("\n");
 
   try {
-    const generated = await toModelPrompt(modelConfig, prompt);
-    const parsed = parseJsonObject(generated);
+    const generated = await toModelPrompt(
+      "exam_mode_generation",
+      modelConfig,
+      prompt,
+      {
+        requiresJson: true,
+        minChars: 220,
+        retrievalConfidence: confidence,
+      },
+      0.55,
+    );
+    const parsed = parseJsonObject(generated.text);
 
     const likelyQuestionsRaw = Array.isArray(parsed?.likelyQuestions) ? parsed.likelyQuestions : [];
     const likelyQuestions = likelyQuestionsRaw
@@ -902,6 +1058,7 @@ export async function buildExamModeContent(
           ? parsed.examTip
           : "Practice high-likelihood questions first and focus on concise structured answers.",
       citations: retrieval.citations,
+      routingMeta: generated.meta,
     };
   } catch {
     return {
@@ -918,6 +1075,12 @@ export async function buildExamModeContent(
       weakAreas: ["Unable to infer all weak areas from available context."],
       examTip: "Revise definitions, solve one timed answer, then re-attempt exam mode.",
       citations: retrieval.citations,
+      routingMeta: {
+        taskType: "exam_mode_generation",
+        modelUsed: "fallback",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 }
@@ -927,10 +1090,20 @@ export async function buildMicroQuizContent(
   topic: string,
   modelConfig: ModelConfig,
   count = 4,
-): Promise<{ questions: MicroQuizQuestion[]; citations: SourceCitation[] }> {
+  generationContext?: StudyGenerationContext,
+): Promise<MicroQuizContent> {
   const retrieval = await getTopChunks(files, `${topic} quiz questions`, 8);
   if (!retrieval.chunks.length) {
-    return { questions: [], citations: [] };
+    return {
+      questions: [],
+      citations: [],
+      routingMeta: {
+        taskType: "quiz_generation",
+        modelUsed: "cache-none",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
+    };
   }
 
   const context = cleanRetrievedText(retrieval.chunks.join("\n\n"));
@@ -942,13 +1115,23 @@ export async function buildMicroQuizContent(
     '{ "questions": [{ "question": string, "answer": string, "explanation": string, "difficulty": "easy"|"medium"|"hard" }] }',
     `Generate ${Math.max(3, Math.min(5, count))} short exam-style questions for topic: ${topic}.`,
     "Each answer and explanation must be grounded in context.",
+    ...buildContextEnvelope(generationContext),
     "Context:",
     context,
   ].join("\n");
 
   try {
-    const generated = await toModelPrompt(modelConfig, prompt);
-    const parsed = parseJsonObject(generated);
+    const generated = await toModelPrompt(
+      "quiz_generation",
+      modelConfig,
+      prompt,
+      {
+        requiresJson: true,
+        minChars: 180,
+      },
+      0.4,
+    );
+    const parsed = parseJsonObject(generated.text);
     const questionsRaw = Array.isArray(parsed?.questions) ? parsed.questions : [];
 
     const questions = questionsRaw
@@ -973,11 +1156,18 @@ export async function buildMicroQuizContent(
     return {
       questions,
       citations: retrieval.citations,
+      routingMeta: generated.meta,
     };
   } catch {
     return {
       questions: [],
       citations: retrieval.citations,
+      routingMeta: {
+        taskType: "quiz_generation",
+        modelUsed: "fallback",
+        fallbackTriggered: false,
+        latencyMs: 0,
+      },
     };
   }
 }

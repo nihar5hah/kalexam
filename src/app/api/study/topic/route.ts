@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { ModelConfig, TopicPriority, UploadedFile } from "@/lib/ai/types";
+import { TopicPriority, UploadedFile } from "@/lib/ai/types";
+import { resolveModelConfig } from "@/lib/ai/modelRouter";
 import { buildTopicStudyContent } from "@/lib/study/rag";
 
 export const runtime = "nodejs";
@@ -16,26 +17,12 @@ type TopicStudyRequest = {
     apiKey?: string;
     modelName?: string;
   } | null;
+  currentChapter?: string;
+  examTimeRemaining?: string;
+  studyMode?: string;
+  examMode?: boolean;
+  userIntent?: string;
 };
-
-function toModelConfig(body: TopicStudyRequest): ModelConfig {
-  if (body.modelType === "custom") {
-    if (!body.modelConfig?.baseUrl || !body.modelConfig?.apiKey || !body.modelConfig?.modelName) {
-      throw new Error("Missing custom model configuration");
-    }
-
-    return {
-      modelType: "custom",
-      config: {
-        baseUrl: body.modelConfig.baseUrl,
-        apiKey: body.modelConfig.apiKey,
-        modelName: body.modelConfig.modelName,
-      },
-    };
-  }
-
-  return { modelType: "gemini" };
-}
 
 export async function POST(request: Request) {
   try {
@@ -51,9 +38,16 @@ export async function POST(request: Request) {
     }
 
     const priority = body.priority ?? "medium";
-    const modelConfig = toModelConfig(body);
+    const modelConfig = resolveModelConfig(body);
     const content = await buildTopicStudyContent(files, body.topic, priority, modelConfig, {
       outlineOnly: Boolean(body.outlineOnly),
+      context: {
+        currentChapter: body.currentChapter,
+        examTimeRemaining: body.examTimeRemaining,
+        studyMode: body.studyMode,
+        examMode: body.examMode,
+        userIntent: body.userIntent,
+      },
     });
 
     return NextResponse.json(content);

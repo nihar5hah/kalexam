@@ -10,9 +10,14 @@ import { ModelSwitcher } from "@/components/ModelSwitcher";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CustomProviderConfig, FileCategory, ModelType, StrategyResult, UploadedFile } from "@/lib/ai/types";
+import { FAST_MODEL } from "@/lib/ai/modelRouter";
 import { getFirebaseStorage } from "@/lib/firebase";
 import { createStrategy, saveStudyTopicCache } from "@/lib/firestore/strategies";
-import { createStudySession, saveTopicCacheToSession } from "@/lib/firestore/study-sessions";
+import {
+  createStudySession,
+  saveStudyAnswerCacheToSession,
+  saveTopicCacheToSession,
+} from "@/lib/firestore/study-sessions";
 
 type GenerateStrategyApiResponse = {
   strategy: StrategyResult;
@@ -174,7 +179,7 @@ function getModelCacheKey(
     return `custom:${customConfig.modelName || "custom-model"}`;
   }
 
-  return "gemini";
+  return FAST_MODEL;
 }
 
 export function UploadForm() {
@@ -405,7 +410,7 @@ export function UploadForm() {
       const fileSignature = `${STUDY_CACHE_SCHEMA_VERSION}:${uploadedSyllabus
         .concat(uploadedMaterial, uploadedPrevious)
         .map((file) => file.url)
-        .join("|")}:${normalizedSyllabusText.toLowerCase().replace(/\s+/g, " ")}`;
+        .join("|")}`;
 
       const topTopics = [...data.strategy.topics]
         .sort((a, b) => {
@@ -430,8 +435,12 @@ export function UploadForm() {
               priority: topic.priority,
               outlineOnly: false,
               files: [...uploadedSyllabus, ...uploadedMaterial, ...uploadedPrevious],
-              modelType,
-              modelConfig: modelType === "custom" ? customConfig : undefined,
+              modelType: "gemini",
+              currentChapter: topic.chapterTitle,
+              examTimeRemaining: `${hoursLeft}h`,
+              studyMode: "precompute",
+              examMode: false,
+              userIntent: "precompute top-priority topic summary",
             }),
           });
 
@@ -440,7 +449,10 @@ export function UploadForm() {
           }
 
           const precomputed = await precomputeResponse.json();
-          const modelCache = getModelCacheKey(modelType, customConfig);
+          const modelCache = FAST_MODEL;
+          const learnNowSeed = Array.isArray(precomputed?.whatToLearn)
+            ? precomputed.whatToLearn[0]
+            : undefined;
 
           await Promise.all([
             saveStudyTopicCache(user.uid, strategyId, topic.slug, {
@@ -456,6 +468,62 @@ export function UploadForm() {
               content: precomputed,
             }),
           ]);
+
+          if (typeof learnNowSeed === "string" && learnNowSeed.trim()) {
+            const learnResponse = await fetch("/api/study/learn-item", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                topic: topic.title,
+                item: learnNowSeed,
+                files: [...uploadedSyllabus, ...uploadedMaterial, ...uploadedPrevious],
+                modelType: "gemini",
+                currentChapter: topic.chapterTitle,
+                examTimeRemaining: `${hoursLeft}h`,
+                studyMode: "precompute",
+                examMode: false,
+                userIntent: "precompute learn-now answer",
+              }),
+            });
+
+            if (learnResponse.ok) {
+              const learnNowAnswer = await learnResponse.json();
+              const answerCacheKey = `${topic.slug}:${learnNowSeed}`;
+
+              await saveStudyAnswerCacheToSession(user.uid, strategyId, answerCacheKey, {
+                signature: fileSignature,
+                schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
+                model: modelCache,
+                item: learnNowSeed,
+                answer: {
+                  conceptExplanation: String(learnNowAnswer.conceptExplanation ?? ""),
+                  example: String(learnNowAnswer.example ?? ""),
+                  examTip: String(learnNowAnswer.examTip ?? ""),
+                  typicalExamQuestion: String(learnNowAnswer.typicalExamQuestion ?? ""),
+                  fullAnswer: String(learnNowAnswer.fullAnswer ?? ""),
+                  confidence:
+                    learnNowAnswer.confidence === "high" ||
+                    learnNowAnswer.confidence === "medium" ||
+                    learnNowAnswer.confidence === "low"
+                      ? learnNowAnswer.confidence
+                      : "low",
+                  citations: Array.isArray(learnNowAnswer.citations)
+                    ? learnNowAnswer.citations.map((citation: {
+                        sourceType?: string;
+                        sourceName?: string;
+                        sourceYear?: string;
+                        importanceLevel?: string;
+                      }) => ({
+                        sourceType: String(citation.sourceType ?? "Study Material"),
+                        sourceName: String(citation.sourceName ?? "Uploaded Material"),
+                        sourceYear: citation.sourceYear,
+                        importanceLevel: String(citation.importanceLevel ?? "SUPPORTING"),
+                      }))
+                    : [],
+                },
+              });
+            }
+          }
         })
       );
 

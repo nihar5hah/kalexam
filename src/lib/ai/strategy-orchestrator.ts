@@ -1,4 +1,5 @@
 import { generateStrategy } from "@/lib/ai/ai-client";
+import { FAST_MODEL, resolveModelConfig } from "@/lib/ai/modelRouter";
 import {
   ModelConfig,
   StrategyResult,
@@ -191,26 +192,11 @@ function getModelLabel(body: StrategyPipelineRequest): string {
     return body.modelConfig?.modelName ?? "Custom Model";
   }
 
-  return process.env.GEMINI_MODEL ?? "Gemini";
+  return FAST_MODEL;
 }
 
 function toModelConfig(body: StrategyPipelineRequest): ModelConfig {
-  if (body.modelType === "custom") {
-    if (!body.modelConfig?.baseUrl || !body.modelConfig?.apiKey || !body.modelConfig?.modelName) {
-      throw new Error("Missing custom model configuration");
-    }
-
-    return {
-      modelType: "custom",
-      config: {
-        baseUrl: body.modelConfig.baseUrl,
-        apiKey: body.modelConfig.apiKey,
-        modelName: body.modelConfig.modelName,
-      },
-    };
-  }
-
-  return { modelType: "gemini" };
+  return resolveModelConfig(body);
 }
 
 async function updateJob(userId: string, jobId: string, patch: Partial<StrategyJobState>) {

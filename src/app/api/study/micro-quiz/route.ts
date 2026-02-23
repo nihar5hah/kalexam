@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { ModelConfig, UploadedFile } from "@/lib/ai/types";
+import { UploadedFile } from "@/lib/ai/types";
+import { resolveModelConfig } from "@/lib/ai/modelRouter";
 import { buildMicroQuizContent } from "@/lib/study/rag";
 
 export const runtime = "nodejs";
@@ -15,26 +16,12 @@ type MicroQuizRequest = {
     apiKey?: string;
     modelName?: string;
   } | null;
+  currentChapter?: string;
+  examTimeRemaining?: string;
+  studyMode?: string;
+  examMode?: boolean;
+  userIntent?: string;
 };
-
-function toModelConfig(body: MicroQuizRequest): ModelConfig {
-  if (body.modelType === "custom") {
-    if (!body.modelConfig?.baseUrl || !body.modelConfig?.apiKey || !body.modelConfig?.modelName) {
-      throw new Error("Missing custom model configuration");
-    }
-
-    return {
-      modelType: "custom",
-      config: {
-        baseUrl: body.modelConfig.baseUrl,
-        apiKey: body.modelConfig.apiKey,
-        modelName: body.modelConfig.modelName,
-      },
-    };
-  }
-
-  return { modelType: "gemini" };
-}
 
 export async function POST(request: Request) {
   try {
@@ -48,9 +35,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing files" }, { status: 400 });
     }
 
-    const modelConfig = toModelConfig(body);
+    const modelConfig = resolveModelConfig(body);
     const count = Math.max(3, Math.min(5, Math.round(body.count ?? 4)));
-    const quiz = await buildMicroQuizContent(files, body.topic, modelConfig, count);
+    const quiz = await buildMicroQuizContent(files, body.topic, modelConfig, count, {
+      currentChapter: body.currentChapter,
+      examTimeRemaining: body.examTimeRemaining,
+      studyMode: body.studyMode,
+      examMode: body.examMode,
+      userIntent: body.userIntent,
+    });
     return NextResponse.json(quiz);
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });

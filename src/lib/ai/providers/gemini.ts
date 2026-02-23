@@ -1,6 +1,6 @@
 const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-1.5-flash";
 
-export async function generateWithGemini(prompt: string): Promise<string> {
+export async function generateWithGeminiModel(prompt: string, modelName: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -8,7 +8,7 @@ export async function generateWithGemini(prompt: string): Promise<string> {
   }
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_MODEL}:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -35,4 +35,8 @@ export async function generateWithGemini(prompt: string): Promise<string> {
   }
 
   return text;
+}
+
+export async function generateWithGemini(prompt: string): Promise<string> {
+  return generateWithGeminiModel(prompt, DEFAULT_GEMINI_MODEL);
 }

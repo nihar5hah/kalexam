@@ -1,5 +1,4 @@
-import { generateWithCustomProvider } from "@/lib/ai/providers/custom";
-import { generateWithGemini } from "@/lib/ai/providers/gemini";
+import { generateWithModelRouter } from "@/lib/ai/modelRouter";
 import {
   GenerateStrategyInput,
   ModelConfig,
@@ -85,11 +84,20 @@ export async function generateStrategy(
   modelConfig: ModelConfig
 ): Promise<StrategyResult> {
   const prompt = buildPrompt(input);
+  const routed = await generateWithModelRouter({
+    prompt,
+    taskType: "strategy_generation",
+    modelConfig,
+    complexityScore: 0.95,
+    qualitySignals: {
+      requiresJson: true,
+      minChars: 300,
+    },
+  });
 
-  const rawResponse =
-    modelConfig.modelType === "custom"
-      ? await generateWithCustomProvider(prompt, modelConfig.config)
-      : await generateWithGemini(prompt);
-
-  return parseStrategyResult(rawResponse);
+  const parsed = parseStrategyResult(routed.text);
+  return {
+    ...parsed,
+    modelUsed: routed.meta.modelUsed,
+  };
 }

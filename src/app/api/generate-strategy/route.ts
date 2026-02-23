@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { generateStrategy } from "@/lib/ai/ai-client";
+import { FAST_MODEL, resolveModelConfig } from "@/lib/ai/modelRouter";
 import {
-  ModelConfig,
   StrategyResult,
   SyllabusChapterHint,
   TopicPriority,
@@ -173,26 +173,7 @@ function getModelLabel(body: RequestBody): string {
     return body.modelConfig?.modelName ?? "Custom Model";
   }
 
-  return process.env.GEMINI_MODEL ?? "Gemini";
-}
-
-function toModelConfig(body: RequestBody): ModelConfig {
-  if (body.modelType === "custom") {
-    if (!body.modelConfig?.baseUrl || !body.modelConfig?.apiKey || !body.modelConfig?.modelName) {
-      throw new Error("Missing custom model configuration");
-    }
-
-    return {
-      modelType: "custom",
-      config: {
-        baseUrl: body.modelConfig.baseUrl,
-        apiKey: body.modelConfig.apiKey,
-        modelName: body.modelConfig.modelName,
-      },
-    };
-  }
-
-  return { modelType: "gemini" };
+  return FAST_MODEL;
 }
 
 export async function POST(request: Request) {
@@ -215,7 +196,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const modelConfig = toModelConfig(body);
+    const modelConfig = resolveModelConfig(body);
     const allFiles = [...syllabusFiles, ...studyMaterialFiles, ...previousPaperFiles];
     const parsed = await parseUploadedFiles(allFiles);
     const mergedSyllabusText = [parsed.syllabusText, syllabusTextInput].filter(Boolean).join("\n\n").trim();
