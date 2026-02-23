@@ -15,6 +15,11 @@ import {
 
 import { StrategyResult, UploadedFile } from "@/lib/ai/types";
 import { getFirebaseDb } from "@/lib/firebase";
+import {
+  isFallbackLikeChatPayload,
+  isFallbackLikeLearnPayload,
+  isFallbackLikeTopicPayload,
+} from "@/lib/study/fallback-detection";
 
 /**
  * Recursively replaces every `undefined` value with `null` so that Firestore
@@ -582,6 +587,10 @@ export async function saveTopicCacheToSession(
     content: unknown;
   },
 ) {
+  if (isFallbackLikeTopicPayload(payload.content)) {
+    return;
+  }
+
   const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
   if (!sessionRef) {
     return;
@@ -736,6 +745,14 @@ export async function saveStudyAnswerCacheToSession(
     };
   },
 ) {
+  if (isFallbackLikeChatPayload({ answer: payload.answer })) {
+    return;
+  }
+
+  if (isFallbackLikeLearnPayload(payload.answer)) {
+    return;
+  }
+
   const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
   if (!sessionRef) {
     return;

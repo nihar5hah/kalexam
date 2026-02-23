@@ -18,6 +18,7 @@ import {
   saveStudyAnswerCacheToSession,
   saveTopicCacheToSession,
 } from "@/lib/firestore/study-sessions";
+import { isFallbackLikeLearnPayload, isFallbackLikeTopicPayload } from "@/lib/study/fallback-detection";
 
 type GenerateStrategyApiResponse = {
   strategy: StrategyResult;
@@ -80,7 +81,7 @@ const JOB_STAGE_TO_UI: Record<StrategyJobStage, ProgressStage> = {
   failed: "strategy",
 };
 
-const STUDY_CACHE_SCHEMA_VERSION = "v2";
+const STUDY_CACHE_SCHEMA_VERSION = "v3";
 
 function getFileExtension(fileName: string): string {
   const pieces = fileName.split(".");
@@ -454,20 +455,22 @@ export function UploadForm() {
             ? precomputed.whatToLearn[0]
             : undefined;
 
-          await Promise.all([
-            saveStudyTopicCache(user.uid, strategyId, topic.slug, {
-              signature: fileSignature,
-              schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
-              generatedAt: new Date().toISOString(),
-              content: precomputed,
-            }),
-            saveTopicCacheToSession(user.uid, strategyId, topic.slug, {
-              signature: fileSignature,
-              schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
-              model: modelCache,
-              content: precomputed,
-            }),
-          ]);
+          if (!isFallbackLikeTopicPayload(precomputed)) {
+            await Promise.all([
+              saveStudyTopicCache(user.uid, strategyId, topic.slug, {
+                signature: fileSignature,
+                schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
+                generatedAt: new Date().toISOString(),
+                content: precomputed,
+              }),
+              saveTopicCacheToSession(user.uid, strategyId, topic.slug, {
+                signature: fileSignature,
+                schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
+                model: modelCache,
+                content: precomputed,
+              }),
+            ]);
+          }
 
           if (typeof learnNowSeed === "string" && learnNowSeed.trim()) {
             const learnResponse = await fetch("/api/study/learn-item", {
@@ -489,6 +492,10 @@ export function UploadForm() {
             if (learnResponse.ok) {
               const learnNowAnswer = await learnResponse.json();
               const answerCacheKey = `${topic.slug}:${learnNowSeed}`;
+
+              if (isFallbackLikeLearnPayload(learnNowAnswer)) {
+                return;
+              }
 
               await saveStudyAnswerCacheToSession(user.uid, strategyId, answerCacheKey, {
                 signature: fileSignature,

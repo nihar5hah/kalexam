@@ -44,6 +44,11 @@ import {
   saveChatCacheToSession,
 } from "@/lib/firestore/study-sessions";
 import { FALLBACK_MESSAGE } from "@/lib/study/constants";
+import {
+  isFallbackLikeChatPayload,
+  isFallbackLikeLearnPayload,
+  isFallbackLikeTopicPayload,
+} from "@/lib/study/fallback-detection";
 
 type StudyModelPayload =
   | {
@@ -191,7 +196,7 @@ type TopicSignal = {
   skippedCount: number;
 };
 
-const STUDY_CACHE_SCHEMA_VERSION = "v2";
+const STUDY_CACHE_SCHEMA_VERSION = "v3";
 
 function getModelCacheKey(payload: StudyModelPayload): string {
   if (payload.modelType === "custom") {
@@ -428,7 +433,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const cached =
         cacheEntry &&
         cacheEntry.signature === expectedSignature &&
-        cacheEntry.schemaVersion === STUDY_CACHE_SCHEMA_VERSION
+        cacheEntry.schemaVersion === STUDY_CACHE_SCHEMA_VERSION &&
+        !isFallbackLikeTopicPayload(cacheEntry.content)
           ? cacheEntry.content
           : null;
 
@@ -564,8 +570,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       return {
         nextTopicInChapter: null as StudyTopic | null,
         nextChapterStart: null as StudyTopic | null,
-        recommendedNextTopic: null as StudyTopic | null,
-        recommendedReason: "",
       };
     }
 
@@ -670,8 +674,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
             ?.topics[0] ?? null
         : null;
 
-    return { nextTopicInChapter, nextChapterStart, recommendedNextTopic, recommendedReason };
-  }, [activeChapter, sessionExamDate, strategy, topic, topicSignals, topicStatuses]);
+    return { nextTopicInChapter, nextChapterStart };
+  }, [activeChapter, strategy, topic]);
 
   const topicProgressLabel = useMemo(() => {
     if (!activeChapter || !topic) {
@@ -818,7 +822,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       STUDY_CACHE_SCHEMA_VERSION,
     );
 
-    if (cachedChat) {
+    if (cachedChat && !isFallbackLikeChatPayload(cachedChat)) {
       setChatHistory((current) => [
         ...current,
         {
@@ -1001,7 +1005,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         STUDY_CACHE_SCHEMA_VERSION,
       );
 
-      if (cachedLearnAnswer) {
+      if (cachedLearnAnswer && !isFallbackLikeLearnPayload(cachedLearnAnswer)) {
         setLearnedItems((current) => ({
           ...current,
           [key]: {
@@ -1275,22 +1279,17 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     );
   }
 
-  const nextHref = nextFlow.recommendedNextTopic
-    ? `/study/${nextFlow.recommendedNextTopic.slug}?id=${strategyId}`
-    : nextFlow.nextTopicInChapter
+  const nextHref = nextFlow.nextTopicInChapter
     ? `/study/${nextFlow.nextTopicInChapter.slug}?id=${strategyId}`
     : nextFlow.nextChapterStart
       ? `/study/${nextFlow.nextChapterStart.slug}?id=${strategyId}`
       : `/dashboard?id=${strategyId}`;
-  const nextLabel = nextFlow.recommendedNextTopic
-    ? "🔥 Recommended Next Topic"
-    : nextFlow.nextTopicInChapter
-    ? "Continue Chapter"
+  const nextLabel = nextFlow.nextTopicInChapter
+    ? "Next Topic"
     : nextFlow.nextChapterStart
-      ? "Start Next Chapter"
+      ? "Next Chapter"
       : "Back to Dashboard";
-  const hasNextStep = Boolean(nextFlow.recommendedNextTopic || nextFlow.nextTopicInChapter || nextFlow.nextChapterStart);
-  const nextReason = nextFlow.recommendedReason;
+  const hasNextStep = Boolean(nextFlow.nextTopicInChapter || nextFlow.nextChapterStart);
 
   return (
     <div className="h-screen bg-[#050505] text-white selection:bg-orange-500/20 overflow-hidden flex flex-col relative">
@@ -1399,7 +1398,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                               {learned.content.citations.length ? (
                                 <div className="flex flex-wrap gap-2 pt-1">
                                   {learned.content.citations.slice(0, 3).map((source, sourceIndex) => (
-                                    <Badge key={`${source.sourceName}-${sourceIndex}`} className="bg-white/10 text-white border-none text-[11px]">
+                                    <Badge key={`${source.sourceName}-${sourceIndex}`} className="bg-white/10 text-white border-none text-[11px] rounded-xl whitespace-normal h-auto">
                                       {source.sourceType} — {source.sourceName}
                                       {source.sourceYear ? ` (${source.sourceYear})` : ""}
                                     </Badge>
@@ -1515,7 +1514,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                         {question.sources.length ? (
                           <div className="flex flex-wrap gap-2 pt-1">
                             {question.sources.slice(0, 3).map((source, sourceIndex) => (
-                              <Badge key={`${source.sourceName}-${sourceIndex}`} className="bg-white/10 text-white border-none text-[11px]">
+                              <Badge key={`${source.sourceName}-${sourceIndex}`} className="bg-white/10 text-white border-none text-[11px] rounded-xl whitespace-normal h-auto">
                                 {source.sourceType} — {source.sourceName}
                                 {source.sourceYear ? ` (${source.sourceYear})` : ""}
                               </Badge>
@@ -1532,7 +1531,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                     <p className="text-xs uppercase tracking-wide text-indigo-200/80">Source Transparency</p>
                     <div className="mt-2 flex flex-wrap gap-2">
                       {studyData.sourceRefs.slice(0, 6).map((source, index) => (
-                        <Badge key={`${source.sourceName}-${index}`} className="bg-white/10 text-white border-none text-[11px]">
+                        <Badge key={`${source.sourceName}-${index}`} className="bg-white/10 text-white border-none text-[11px] rounded-xl whitespace-normal h-auto">
                           {source.sourceType} — {source.sourceName}
                           {source.sourceYear ? ` (${source.sourceYear})` : ""}
                         </Badge>
@@ -1699,7 +1698,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                             {message.citations.slice(0, 3).map((citation, index) => (
                               <span
                                 key={`${citation.sourceName}-${index}`}
-                                className="text-[10px] rounded-full bg-white/10 px-2 py-0.5 text-neutral-300"
+                                className="text-[10px] rounded-xl bg-white/10 px-2 py-1 text-neutral-300 leading-snug"
                               >
                                 {citation.sourceType}: {citation.sourceName}
                                 {citation.sourceYear ? ` (${citation.sourceYear})` : ""}
@@ -1745,26 +1744,20 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
             <Link href={`/dashboard?id=${strategyId}`}>Back to Dashboard</Link>
           </Button>
 
-          <div className="hidden md:flex items-center gap-3">
-            {/* Visual session progress strip */}
-            <div className="flex flex-col items-center gap-1">
-              <div className="w-32 h-1.5 rounded-full bg-white/10 overflow-hidden">
-                <div
-                  className="h-full bg-orange-500 transition-all duration-500"
-                  style={{ width: `${globalProgress.percent}%` }}
-                />
+          <div className="hidden md:flex items-center gap-4">
+            <div className="flex items-center gap-3">
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-neutral-400 tabular-nums">{globalProgress.completed}/{globalProgress.total} topics</span>
+                  <span className="text-[10px] text-neutral-500">{globalProgress.percent}%</span>
+                </div>
+                <div className="w-36 h-1 rounded-full bg-white/10 overflow-hidden">
+                  <div className="h-full bg-orange-500 rounded-full transition-all duration-500" style={{ width: `${globalProgress.percent}%` }} />
+                </div>
               </div>
-              <span className="text-[10px] text-neutral-400">{globalProgress.completed}/{globalProgress.total} topics</span>
-            </div>
-            <div className="flex items-center gap-2">
               {topicProgressLabel ? (
-                <span className="text-xs md:text-sm text-neutral-300 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+                <span className="text-[11px] text-neutral-400 tabular-nums border-l border-white/10 pl-4">
                   {topicProgressLabel}
-                </span>
-              ) : null}
-              {nextReason ? (
-                <span className="text-xs text-neutral-300 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
-                  {nextReason}
                 </span>
               ) : null}
             </div>

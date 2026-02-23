@@ -320,6 +320,30 @@ function hasTokenMatch(text: string, tokens: string[]): boolean {
   return tokens.some((token) => normalized.includes(token));
 }
 
+function toFallbackReason(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = String((error as { code?: unknown }).code ?? "").trim();
+    if (code) {
+      return `provider_error:${code}`;
+    }
+  }
+
+  if (error instanceof Error) {
+    const normalized = error.message.toLowerCase();
+    if (normalized.includes("missing_api_key") || normalized.includes("missing gemini_api_key")) {
+      return "provider_error:missing_api_key";
+    }
+    if (normalized.includes("request failed") || normalized.includes("status")) {
+      return "provider_error:request_failed";
+    }
+    if (normalized.includes("empty response")) {
+      return "provider_error:empty_response";
+    }
+  }
+
+  return "provider_error:unknown";
+}
+
 function extractQuestionLikeLine(text: string): string | undefined {
   const sentences = text
     .split(/(?<=[.!?])\s+/)
@@ -582,7 +606,8 @@ export async function buildTopicStudyContent(
       routingMeta: {
         taskType: "topic_description",
         modelUsed: "cache-none",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: "no_retrieval_chunks",
         latencyMs: 0,
       },
     };
@@ -677,7 +702,7 @@ export async function buildTopicStudyContent(
     strictNormalized.routingMeta = generated.meta;
 
     return strictNormalized;
-  } catch {
+  } catch (error) {
     return {
       whatToLearn: defaultWhatToLearn(topic),
       explanation: {
@@ -719,7 +744,8 @@ export async function buildTopicStudyContent(
       routingMeta: {
         taskType: "topic_description",
         modelUsed: "fallback",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: toFallbackReason(error),
         latencyMs: 0,
       },
     };
@@ -748,7 +774,8 @@ export async function buildLearnItemContent(
       routingMeta: {
         taskType: "learn_now_answer",
         modelUsed: "cache-none",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: "no_retrieval_chunks",
         latencyMs: 0,
       },
     };
@@ -806,7 +833,7 @@ export async function buildLearnItemContent(
       citations: retrieval.citations,
       routingMeta: generated.meta,
     };
-  } catch {
+  } catch (error) {
     return {
       conceptExplanation: "Not found in uploaded material.",
       example: "",
@@ -818,7 +845,8 @@ export async function buildLearnItemContent(
       routingMeta: {
         taskType: "learn_now_answer",
         modelUsed: "fallback",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: toFallbackReason(error),
         latencyMs: 0,
       },
     };
@@ -844,7 +872,8 @@ export async function answerTopicQuestion(
       routingMeta: {
         taskType: "chat_follow_up",
         modelUsed: "cache-none",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: "no_retrieval_chunks",
         latencyMs: 0,
       },
     };
@@ -898,7 +927,7 @@ export async function answerTopicQuestion(
     const queryTokens = tokenize(`${topic} ${question}`);
     const isGrounded = hasTokenMatch(answerText, queryTokens);
     if (!isGrounded) {
-      if (retrieval.score >= 8) {
+      if (retrieval.score >= 5) {
         const normalized = answerText.startsWith("Not directly found in your material, but relevant:")
           ? answerText
           : `Not directly found in your material, but relevant:\n\n${answerText}`;
@@ -925,7 +954,7 @@ export async function answerTopicQuestion(
       citations: retrieval.citations,
       routingMeta: response.meta,
     };
-  } catch {
+  } catch (error) {
     const fallbackAnswer = "Not found in uploaded material.";
     return {
       answer: fallbackAnswer || FALLBACK_MESSAGE,
@@ -934,7 +963,8 @@ export async function answerTopicQuestion(
       routingMeta: {
         taskType: "chat_follow_up",
         modelUsed: "fallback",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: toFallbackReason(error),
         latencyMs: 0,
       },
     };
@@ -968,7 +998,8 @@ export async function buildExamModeContent(
       routingMeta: {
         taskType: "exam_mode_generation",
         modelUsed: "cache-none",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: "no_retrieval_chunks",
         latencyMs: 0,
       },
     };
@@ -1060,7 +1091,7 @@ export async function buildExamModeContent(
       citations: retrieval.citations,
       routingMeta: generated.meta,
     };
-  } catch {
+  } catch (error) {
     return {
       likelyQuestions: [
         {
@@ -1078,7 +1109,8 @@ export async function buildExamModeContent(
       routingMeta: {
         taskType: "exam_mode_generation",
         modelUsed: "fallback",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: toFallbackReason(error),
         latencyMs: 0,
       },
     };
@@ -1100,7 +1132,8 @@ export async function buildMicroQuizContent(
       routingMeta: {
         taskType: "quiz_generation",
         modelUsed: "cache-none",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: "no_retrieval_chunks",
         latencyMs: 0,
       },
     };
@@ -1158,14 +1191,15 @@ export async function buildMicroQuizContent(
       citations: retrieval.citations,
       routingMeta: generated.meta,
     };
-  } catch {
+  } catch (error) {
     return {
       questions: [],
       citations: retrieval.citations,
       routingMeta: {
         taskType: "quiz_generation",
         modelUsed: "fallback",
-        fallbackTriggered: false,
+        fallbackTriggered: true,
+        fallbackReason: toFallbackReason(error),
         latencyMs: 0,
       },
     };

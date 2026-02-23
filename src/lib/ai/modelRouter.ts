@@ -3,7 +3,7 @@ import { generateWithCustomProvider } from "@/lib/ai/providers/custom";
 import { generateWithGeminiModel } from "@/lib/ai/providers/gemini";
 
 export const SMART_MODEL = "gemini-3.1-pro-preview";
-export const FAST_MODEL = "gemini-3-flash";
+export const FAST_MODEL = "gemini-3-flash-preview";
 
 export type AiTaskType =
   | "strategy_generation"
@@ -53,6 +53,22 @@ type RoutedGenerationInput = {
   complexityScore?: number;
   qualitySignals?: QualitySignals;
 };
+
+type ProviderErrorCode =
+  | "missing_api_key"
+  | "request_failed"
+  | "empty_response"
+  | "unknown_provider_error";
+
+class ModelRouterGenerationError extends Error {
+  readonly code: ProviderErrorCode;
+
+  constructor(code: ProviderErrorCode, message: string) {
+    super(message);
+    this.name = "ModelRouterGenerationError";
+    this.code = code;
+  }
+}
 
 const SMART_TASKS = new Set<AiTaskType>([
   "strategy_generation",
@@ -116,12 +132,42 @@ function evaluateFastOutputQuality(raw: string, signals?: QualitySignals): { ok:
   return { ok: true };
 }
 
-async function runWithModel(prompt: string, modelConfig: ModelConfig, modelName: string): Promise<string> {
-  if (modelConfig.modelType === "custom") {
-    return generateWithCustomProvider(prompt, modelConfig.config);
+function classifyProviderError(error: unknown): ProviderErrorCode {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = String((error as { code?: unknown }).code ?? "");
+    if (code === "missing_api_key" || code === "request_failed" || code === "empty_response") {
+      return code;
+    }
   }
 
-  return generateWithGeminiModel(prompt, modelName);
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    if (message.includes("missing") && message.includes("api")) {
+      return "missing_api_key";
+    }
+    if (message.includes("empty response")) {
+      return "empty_response";
+    }
+    if (message.includes("request failed") || message.includes("status")) {
+      return "request_failed";
+    }
+  }
+
+  return "unknown_provider_error";
+}
+
+async function runWithModel(prompt: string, modelConfig: ModelConfig, modelName: string): Promise<string> {
+  try {
+    if (modelConfig.modelType === "custom") {
+      return generateWithCustomProvider(prompt, modelConfig.config);
+    }
+
+    return generateWithGeminiModel(prompt, modelName);
+  } catch (error) {
+    const code = classifyProviderError(error);
+    const message = error instanceof Error ? error.message : "Unknown provider error";
+    throw new ModelRouterGenerationError(code, message);
+  }
 }
 
 export async function generateWithModelRouter(
@@ -143,15 +189,43 @@ export async function generateWithModelRouter(
   }
 
   const primaryModel = routeModel(input.taskType, input.complexityScore);
-  const primary = await runWithModel(input.prompt, input.modelConfig, primaryModel);
+  let primary = "";
+  let primaryErrorCode: ProviderErrorCode | null = null;
+
+  try {
+    primary = await runWithModel(input.prompt, input.modelConfig, primaryModel);
+  } catch (error) {
+    primaryErrorCode = classifyProviderError(error);
+  }
 
   if (primaryModel === SMART_MODEL) {
+    if (!primary) {
+      throw new ModelRouterGenerationError(
+        primaryErrorCode ?? "unknown_provider_error",
+        `smart_model_failed:${primaryErrorCode ?? "unknown_provider_error"}`,
+      );
+    }
+
     return {
       text: primary,
       meta: {
         taskType: input.taskType,
         modelUsed: SMART_MODEL,
         fallbackTriggered: false,
+        latencyMs: Date.now() - startedAt,
+      },
+    };
+  }
+
+  if (!primary) {
+    const upgradedAfterPrimaryError = await runWithModel(input.prompt, input.modelConfig, SMART_MODEL);
+    return {
+      text: upgradedAfterPrimaryError,
+      meta: {
+        taskType: input.taskType,
+        modelUsed: SMART_MODEL,
+        fallbackTriggered: true,
+        fallbackReason: `primary_model_error:${primaryErrorCode ?? "unknown_provider_error"}`,
         latencyMs: Date.now() - startedAt,
       },
     };

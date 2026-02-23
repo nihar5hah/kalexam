@@ -21,6 +21,7 @@ import {
   UploadedFile,
 } from "@/lib/ai/types";
 import { getFirebaseDb } from "@/lib/firebase";
+import { isFallbackLikeTopicPayload } from "@/lib/study/fallback-detection";
 
 export type StoredStrategy = {
   strategy: StrategyResult | StrategyResultV1;
@@ -131,6 +132,10 @@ export async function saveStudyTopicCache(
   topicSlug: string,
   cacheEntry: NonNullable<StoredStrategy["studyCache"]>[string]
 ) {
+  if (isFallbackLikeTopicPayload(cacheEntry.content)) {
+    return;
+  }
+
   const db = getFirebaseDb();
   const strategyDocRef = doc(db, "users", uid, "strategies", strategyId);
 
