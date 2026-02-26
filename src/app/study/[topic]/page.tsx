@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 import { AuthenticatedNavBar } from "@/components/AuthenticatedNavBar";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
@@ -2265,19 +2266,33 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           Back to Dashboard
         </Button>
         <div className="flex items-center gap-3">
-          <Button
+          <button
             type="button"
-            variant="outline"
             onClick={() => void handleMarkCompleted()}
-            className={`flex items-center gap-2 rounded-full border-white/10 px-5 ${
+            className={cn(
+              "relative group flex items-center gap-2 rounded-full border px-5 py-2 text-sm font-medium transition-all duration-200",
               completed
-                ? "bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30 border-emerald-500/30"
-                : "bg-white/5 text-white hover:bg-white/10"
-            }`}
+                ? "bg-emerald-500/20 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
+                : "bg-orange-500/10 border-orange-500/30 text-white hover:bg-orange-500/5"
+            )}
           >
+            {/* top neon edge */}
+            <span className={cn(
+              "absolute h-px opacity-0 group-hover:opacity-100 transition-all duration-500 inset-x-0 top-0 bg-gradient-to-r w-3/4 mx-auto",
+              completed
+                ? "from-transparent via-emerald-500 to-transparent"
+                : "from-transparent via-orange-500 to-transparent"
+            )} />
             <Check className="h-4 w-4" />
             {completed ? "Completed" : "Mark Complete"}
-          </Button>
+            {/* bottom neon edge */}
+            <span className={cn(
+              "absolute group-hover:opacity-30 opacity-0 transition-all duration-500 inset-x-0 h-px -bottom-px bg-gradient-to-r w-3/4 mx-auto",
+              completed
+                ? "from-transparent via-emerald-500 to-transparent"
+                : "from-transparent via-orange-500 to-transparent"
+            )} />
+          </button>
           {hasNextStep ? (
             <Button
               type="button"
