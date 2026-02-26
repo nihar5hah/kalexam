@@ -157,7 +157,7 @@ function MobileStudyChatPanelComponent({
       <Button
         type="button"
         size="icon"
-        className="fixed md:hidden bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] right-4 z-[60] h-12 w-12 rounded-full bg-orange-500 hover:bg-orange-400 text-white shadow-lg shadow-orange-500/20"
+        className="fixed md:hidden bottom-[calc(1rem+env(safe-area-inset-bottom,0px))] right-4 z-[60] h-12 w-12 rounded-full bg-orange-500 hover:bg-orange-400 text-white shadow-lg shadow-orange-500/20"
         onClick={onToggle}
         aria-label={open ? "Close chat" : "Open chat"}
       >

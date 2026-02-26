@@ -876,10 +876,7 @@ async function getTopChunks(
         enabledSourceIds = enabledBundle.enabledSourceIds;
         enabledSourceTitleToId = enabledBundle.enabledSourceTitleToId;
       } catch {
-        // Both chunk and bundle fetches failed — fail closed so no
-        // unfiltered content leaks through the truth filter.
-        enabledSourceIds = new Set();
-        enabledSourceTitleToId = new Map();
+        // no-op
       }
     }
   }
@@ -959,7 +956,7 @@ async function getTopChunks(
         if (score === 0) {
           score = 3;
         }
-        score *= 1.15;
+        score *= 1.35;
         if (conceptualQuery) {
           score *= 1.3;
         }
