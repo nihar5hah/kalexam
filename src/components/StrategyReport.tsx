@@ -20,16 +20,6 @@ const fadeIn: Variants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.45, ease: "easeOut" } },
 };
 
-function priorityClass(priority: "high" | "medium" | "low") {
-  if (priority === "high") {
-    return "bg-red-500/20 text-red-200";
-  }
-  if (priority === "medium") {
-    return "bg-amber-500/20 text-amber-200";
-  }
-  return "bg-emerald-500/20 text-emerald-200";
-}
-
 function chapterCompleted(
   topics: StrategyResult["chapters"][number]["topics"],
   progress: StrategyProgress
@@ -203,30 +193,15 @@ export function StrategyReport({
                   </div>
 
                   <div className="flex flex-wrap gap-2">
-                    <Badge className={`${priorityClass(chapter.priority)} border-none uppercase`}>Priority: {chapter.priority}</Badge>
-                    <Badge className="bg-white/10 text-white border-none">Estimated Time: {chapter.estimatedTime}</Badge>
-                    {typeof chapter.materialCoverage === "number" ? (
-                      <Badge className="bg-white/10 text-neutral-300 border-none">Coverage: {chapter.materialCoverage}%</Badge>
-                    ) : null}
+                    <Badge className="bg-white/10 text-white border-none">Study Time: {chapter.estimatedTime}</Badge>
                     {chapter.examLikelihoodSummary ? (
                       <Badge className="bg-orange-500/15 text-orange-300 border-none">
-                        🔥 Avg Likelihood: {chapter.examLikelihoodSummary.averageLikelihood}%
+                        Exam Likelihood: {chapter.examLikelihoodSummary.averageLikelihood}%
                       </Badge>
                     ) : null}
-                    {chapter.weightage ? (
-                      <Badge className="bg-white/10 text-neutral-300 border-none">Weightage: {chapter.weightage}</Badge>
-                    ) : null}
-                    {isDone ? <Badge className="bg-emerald-500/20 text-emerald-200 border-none">Completed</Badge> : null}
                   </div>
                 </div>
-                {chapter.materialWarning ? (
-                  <p className="text-amber-200 text-sm rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2">
-                    ⚠ {chapter.materialWarning}
-                  </p>
-                ) : null}
-                {chapter.lowMaterialConfidence ? (
-                  <p className="text-amber-200 text-xs">Low material confidence — upload more notes.</p>
-                ) : null}
+                {chapter.materialWarning ? <p className="text-amber-200 text-xs">⚠ {chapter.materialWarning}</p> : null}
               </CardHeader>
 
               <CardContent className="space-y-4">

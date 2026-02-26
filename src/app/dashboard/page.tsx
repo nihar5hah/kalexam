@@ -1,15 +1,14 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
 import { BarChart3, CalendarClock, Clock, Files, Gauge, ShieldAlert, Sparkles, Target, Zap } from "lucide-react";
 
 import { AuthenticatedNavBar } from "@/components/AuthenticatedNavBar";
 import { RequireAuth } from "@/components/RequireAuth";
 import { StrategyRecoveryView } from "@/components/StrategyRecoveryView";
-import { StrategyReport } from "@/components/StrategyReport";
 import { StrategyList, type DashboardSessionCard } from "@/components/dashboard/StrategyList";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,6 +22,11 @@ import {
   renameStudySession,
   softDeleteStudySession,
 } from "@/lib/firestore/study-sessions";
+
+const StrategyReport = dynamic(
+  () => import("@/components/StrategyReport").then((module) => module.StrategyReport),
+  { ssr: false },
+);
 
 function estimateStudyTime(totalTopics: number): string {
   if (totalTopics <= 2) {
@@ -260,30 +264,17 @@ function DashboardContent() {
       <AuthenticatedNavBar />
 
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        {/* Top-left primary warm blob */}
-        <motion.div
-          animate={{ scale: [1, 1.12, 0.97, 1.08, 1], opacity: [0.07, 0.13, 0.06, 0.11, 0.07] }}
-          transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
-          className="absolute -top-[10%] -left-[10%] w-[55%] h-[55%] rounded-full"
-          style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.35) 0%, rgba(249,115,22,0.10) 50%, transparent 75%)", filter: "blur(100px)" }}
+        <div
+          className="hidden md:block absolute -top-[10%] -left-[10%] w-[55%] h-[55%] rounded-full"
+          style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.22) 0%, rgba(249,115,22,0.06) 50%, transparent 75%)", filter: "blur(80px)" }}
         />
-        {/* Bottom-right amber drift */}
-        <motion.div
-          animate={{ scale: [1, 1.15, 0.95, 1], opacity: [0.06, 0.11, 0.05, 0.06] }}
-          transition={{ duration: 18, repeat: Infinity, ease: "easeInOut", delay: 3 }}
-          className="absolute -bottom-[15%] -right-[8%] w-[50%] h-[50%] rounded-full"
-          style={{ background: "radial-gradient(ellipse at center, rgba(245,158,11,0.28) 0%, rgba(245,158,11,0.08) 55%, transparent 78%)", filter: "blur(120px)" }}
-        />
-        {/* Center mid-page subtle pulse */}
-        <motion.div
-          animate={{ scaleX: [1, 1.2, 1], scaleY: [1, 0.9, 1], opacity: [0.04, 0.08, 0.04] }}
-          transition={{ duration: 22, repeat: Infinity, ease: "easeInOut", delay: 7 }}
-          className="absolute top-[35%] left-[20%] w-[60%] h-[30%] rounded-full"
-          style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.18) 0%, transparent 70%)", filter: "blur(90px)" }}
+        <div
+          className="hidden md:block absolute -bottom-[15%] -right-[8%] w-[50%] h-[50%] rounded-full"
+          style={{ background: "radial-gradient(ellipse at center, rgba(245,158,11,0.18) 0%, rgba(245,158,11,0.05) 55%, transparent 78%)", filter: "blur(90px)" }}
         />
       </div>
 
-      <div className="relative z-10 mx-auto max-w-6xl px-6 pt-24 pb-16 md:pt-28 md:pb-20 space-y-6">
+      <div className="relative z-10 mx-auto max-w-6xl px-6 pt-24 pb-24 md:pt-28 md:pb-20 space-y-6">
         <div>
           <h1 className="text-3xl md:text-5xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-b from-white to-neutral-400 pb-2">
             Your Study Dashboard
@@ -291,36 +282,57 @@ function DashboardContent() {
           <p className="text-neutral-400 text-sm md:text-base">Revisit your previous sessions and continue learning.</p>
         </div>
 
+        <div className="grid grid-cols-3 gap-2 md:hidden">
+          <Card className="bg-white/5 border border-white/10 rounded-2xl">
+            <CardContent className="pt-3 pb-3 text-center">
+              <p className="text-[10px] text-neutral-400">Completion</p>
+              <p className="text-sm font-semibold text-white">{intel.completionPercent}%</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-white/5 border border-white/10 rounded-2xl">
+            <CardContent className="pt-3 pb-3 text-center">
+              <p className="text-[10px] text-neutral-400">Readiness</p>
+              <p className="text-sm font-semibold text-white">{intel.readinessScore}%</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-white/5 border border-white/10 rounded-2xl">
+            <CardContent className="pt-3 pb-3 text-center">
+              <p className="text-[10px] text-neutral-400">Countdown</p>
+              <p className="text-sm font-semibold text-white">{intel.examCountdown}</p>
+            </CardContent>
+          </Card>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
-          <Card className="bg-orange-500/10 border border-orange-400/20 backdrop-blur-xl rounded-3xl">
+          <Card className="bg-orange-500/10 border border-orange-400/20 backdrop-blur-sm rounded-3xl">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm text-orange-300 flex items-center gap-2"><CalendarClock className="h-4 w-4" />Exam Countdown</CardTitle>
             </CardHeader>
             <CardContent className="text-xl font-semibold text-orange-100">{intel.examCountdown}</CardContent>
           </Card>
 
-          <Card className="bg-white/5 border border-white/10 backdrop-blur-xl rounded-3xl">
+          <Card className="bg-white/5 border border-white/10 backdrop-blur-sm rounded-3xl">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm text-neutral-400 flex items-center gap-2"><BarChart3 className="h-4 w-4" />Completion</CardTitle>
             </CardHeader>
             <CardContent className="text-xl font-semibold text-white">{intel.completionPercent}%</CardContent>
           </Card>
 
-          <Card className="bg-white/5 border border-white/10 backdrop-blur-xl rounded-3xl">
+          <Card className="bg-white/5 border border-white/10 backdrop-blur-sm rounded-3xl">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm text-neutral-400 flex items-center gap-2"><Gauge className="h-4 w-4" />Readiness</CardTitle>
             </CardHeader>
             <CardContent className="text-xl font-semibold text-white">{intel.readinessScore}%</CardContent>
           </Card>
 
-          <Card className="bg-amber-500/10 border border-amber-400/20 backdrop-blur-xl rounded-3xl">
+          <Card className="bg-amber-500/10 border border-amber-400/20 backdrop-blur-sm rounded-3xl">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm text-amber-300 flex items-center gap-2"><ShieldAlert className="h-4 w-4" />Weakest Chapter</CardTitle>
             </CardHeader>
             <CardContent className="text-sm font-medium text-amber-100">{intel.weakestChapter}</CardContent>
           </Card>
 
-          <Card className="bg-emerald-500/10 border border-emerald-400/20 backdrop-blur-xl rounded-3xl">
+          <Card className="bg-emerald-500/10 border border-emerald-400/20 backdrop-blur-sm rounded-3xl">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm text-emerald-300 flex items-center gap-2"><Target className="h-4 w-4" />Today&apos;s Focus</CardTitle>
             </CardHeader>
@@ -328,7 +340,7 @@ function DashboardContent() {
           </Card>
         </div>
 
-        <Card className="bg-white/5 border border-white/10 backdrop-blur-xl rounded-3xl">
+        <Card className="bg-white/5 border border-white/10 backdrop-blur-sm rounded-3xl">
           <CardHeader>
             <CardTitle className="text-white text-lg">Adaptive Coach Insights</CardTitle>
           </CardHeader>
@@ -389,7 +401,7 @@ function DashboardContent() {
         ) : null}
 
         {!strategyId && empty ? (
-          <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-10 md:p-14 text-center relative overflow-hidden">
+          <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-sm p-10 md:p-14 text-center relative overflow-hidden">
             <div className="relative z-10 flex flex-col items-center gap-6">
               <div className="w-20 h-20 rounded-2xl bg-orange-500/15 border border-orange-400/20 flex items-center justify-center shadow-[0_0_40px_rgba(249,115,22,0.2)]">
                 <Sparkles className="w-10 h-10 text-orange-400" />
@@ -434,6 +446,7 @@ function DashboardContent() {
           />
         ) : null}
       </div>
+
     </div>
   );
 }

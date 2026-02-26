@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useState } from "react"
+import React, { useState } from "react"
 import { motion } from "framer-motion"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
@@ -22,7 +22,6 @@ interface NavBarProps {
 export function NavBar({ items, className }: NavBarProps) {
   const pathname = usePathname()
   const [selectedTab, setSelectedTab] = useState(items[0]?.name ?? "")
-  const [isMobile, setIsMobile] = useState(false)
 
   const directMatch = items.find((item) => {
     if (item.url.startsWith("#")) {
@@ -55,20 +54,10 @@ export function NavBar({ items, className }: NavBarProps) {
     }
   }
 
-  useEffect(() => {
-    const handleResize = () => {
-      setIsMobile(window.innerWidth < 768)
-    }
-
-    handleResize()
-    window.addEventListener("resize", handleResize)
-    return () => window.removeEventListener("resize", handleResize)
-  }, [])
-
   return (
     <div
       className={cn(
-        "fixed bottom-6 sm:bottom-auto sm:top-0 left-1/2 -translate-x-1/2 z-50 sm:pt-6 pointer-events-none",
+        "fixed bottom-[calc(1rem+env(safe-area-inset-bottom,0px))] md:bottom-auto md:top-0 left-1/2 -translate-x-1/2 z-50 md:pt-[calc(1.5rem+env(safe-area-inset-top,0px))] pointer-events-none",
         className,
       )}
     >
@@ -79,7 +68,6 @@ export function NavBar({ items, className }: NavBarProps) {
       >
         <div className="flex items-center gap-3 bg-background/5 border border-border backdrop-blur-lg py-1 px-1 rounded-full shadow-lg">
           {items.map((item) => {
-            const Icon = item.icon
             const isActive = activeTab === item.name
 
             return (
@@ -88,12 +76,13 @@ export function NavBar({ items, className }: NavBarProps) {
                 href={item.url}
                 onClick={(event) => handleNavClick(event, item)}
                 className={cn(
-                  "relative cursor-pointer text-sm font-semibold px-6 py-2 rounded-full transition-colors duration-200",
+                  "relative cursor-pointer text-sm font-semibold h-9 min-w-9 px-3 md:px-6 py-2 rounded-full transition-colors duration-200 flex items-center justify-center",
                 "text-foreground/80 hover:text-white transition-colors",
                 isActive && "text-white",
                 )}
               >
-                {isMobile ? <Icon size={18} strokeWidth={2.5} /> : <span>{item.name}</span>}
+                <item.icon className="h-4 w-4 md:hidden" />
+                <span className="hidden md:inline">{item.name}</span>
 
                 {isActive && (
                   <motion.div

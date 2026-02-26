@@ -1,16 +1,17 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
-import { motion } from "framer-motion";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+import dynamic from "next/dynamic";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 
 import { AuthenticatedNavBar } from "@/components/AuthenticatedNavBar";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import { RequireAuth } from "@/components/RequireAuth";
 import { StrategyRecoveryView } from "@/components/StrategyRecoveryView";
-import { AIInputWithLoading } from "@/components/ui/ai-input-with-loading";
-import { AnimatedGlowingBorder } from "@/components/ui/animated-glowing-search-bar";
+import { StudySourcesCard } from "@/components/study/StudySourcesCard";
+import { StudyTopicHero } from "@/components/study/StudyTopicHero";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,12 +44,36 @@ import {
   saveStudyAnswerCacheToSession,
   saveChatCacheToSession,
 } from "@/lib/firestore/study-sessions";
+import {
+  StudySourceRecord,
+  listStudySources,
+  removeStudySource,
+  setStudySourceEnabled,
+  updateStudySourceChunkCount,
+  upsertStudySource,
+} from "@/lib/firestore/sources";
+import { appendIndexedChunks, replaceIndexedChunks } from "@/lib/firestore/chunks";
 import { FALLBACK_MESSAGE } from "@/lib/study/constants";
 import {
   isFallbackLikeChatPayload,
   isFallbackLikeLearnPayload,
   isFallbackLikeTopicPayload,
 } from "@/lib/study/fallback-detection";
+
+const DesktopStudyChatPanel = dynamic(
+  () => import("@/components/study/StudyChatPanel").then((module) => module.DesktopStudyChatPanel),
+  { ssr: false },
+);
+
+const MobileStudyChatPanel = dynamic(
+  () => import("@/components/study/StudyChatPanel").then((module) => module.MobileStudyChatPanel),
+  { ssr: false },
+);
+
+const StudyKeyExamCard = dynamic(
+  () => import("@/components/study/StudyKeyExamCard").then((module) => module.StudyKeyExamCard),
+  { ssr: false },
+);
 
 type StudyModelPayload =
   | {
@@ -105,6 +130,8 @@ type TopicAskApiResponse = {
   answer: string;
   confidence: TopicConfidence;
   citations?: SourceCitation[];
+  usedVideoContext?: boolean;
+  retrievedChunks?: Array<{ sourceName: string; sourceType: string; score: number; selected: boolean }>;
   routingMeta?: {
     taskType: string;
     modelUsed: string;
@@ -122,6 +149,7 @@ type LearnItemApiResponse = {
   fullAnswer: string;
   confidence: TopicConfidence;
   citations: SourceCitation[];
+  retrievedChunks?: Array<{ sourceName: string; sourceType: string; score: number; selected: boolean }>;
   routingMeta?: {
     taskType: string;
     modelUsed: string;
@@ -141,6 +169,7 @@ type MicroQuizQuestion = {
 type MicroQuizApiResponse = {
   questions: MicroQuizQuestion[];
   citations: SourceCitation[];
+  retrievedChunks?: Array<{ sourceName: string; sourceType: string; score: number; selected: boolean }>;
   routingMeta?: {
     taskType: string;
     modelUsed: string;
@@ -162,6 +191,7 @@ type ExamModeApiResponse = {
   weakAreas: string[];
   examTip: string;
   citations: SourceCitation[];
+  retrievedChunks?: Array<{ sourceName: string; sourceType: string; score: number; selected: boolean }>;
   routingMeta?: {
     taskType: string;
     modelUsed: string;
@@ -177,6 +207,7 @@ type ChatMessage = {
   content: string;
   confidence?: TopicConfidence;
   citations?: SourceCitation[];
+  usedVideoContext?: boolean;
 };
 
 type QuickActionKey = "difference" | "example" | "examQuestion" | "explainSimply";
@@ -190,13 +221,178 @@ type QuickActionState = Record<
   }
 >;
 
-type TopicSignal = {
-  confidence: number;
-  revisitCount: number;
-  skippedCount: number;
+type SourceIndexResponse = {
+  error?: string;
+  detail?: string;
+  warnings?: string[];
+  sources: Array<{
+    id: string;
+    type: "pdf" | "ppt" | "docx" | "text" | "youtube" | "url";
+    title: string;
+    status: "indexed" | "error";
+    enabled: boolean;
+    fileUrl?: string;
+    youtubeUrl?: string;
+    websiteUrl?: string;
+    videoId?: string;
+    aiGeneratedTranscript?: boolean;
+    transcriptSource?: "captions" | "ai-reconstructed";
+    videoLanguage?: "english" | "hindi" | "other";
+    translatedToEnglish?: boolean;
+    chunkCount: number;
+    errorMessage?: string;
+  }>;
+  chunks: Array<{
+    sourceId: string;
+    text: string;
+    sourceType: "Previous Paper" | "Question Bank" | "Study Material" | "Syllabus Derived";
+    sourceName: string;
+    sourceYear?: string;
+    section: string;
+  }>;
 };
 
+type StreamEnvelope<TPayload> =
+  | { type: "started" }
+  | { type: "delta"; chunk?: string }
+  | { type: "done"; payload?: TPayload }
+  | { type: "error"; message?: string };
+
 const STUDY_CACHE_SCHEMA_VERSION = "v3";
+
+type SourceAddStatus =
+  | "idle"
+  | "validating"
+  | "fetching"
+  | "fetching-transcript"
+  | "fetching-metadata"
+  | "ai-reconstruction"
+  | "extracting"
+  | "chunking"
+  | "indexing"
+  | "completed"
+  | "failed";
+type SourceIndexLifecycle = "idle" | "preparing" | "parsing" | "chunking" | "indexing" | "saving" | "completed" | "failed";
+
+const INDEXED_CHUNKS_SESSION_CACHE_KEY = "kalexam:indexed-chunks";
+
+function sourceTypeFromFileExtension(extension: string): StudySourceRecord["type"] {
+  const normalized = extension.toLowerCase().replace(".", "");
+  if (normalized === "pdf") return "pdf";
+  if (normalized === "docx") return "docx";
+  if (normalized === "ppt" || normalized === "pptx") return "ppt";
+  return "text";
+}
+
+function toContextSourceRecord(file: UploadedFile): StudySourceRecord {
+  return {
+    id: `uploaded:${file.name}:${file.url}`,
+    type: sourceTypeFromFileExtension(file.extension),
+    title: file.name,
+    status: "indexed",
+    enabled: true,
+    fileUrl: file.url,
+    chunkCount: 0,
+  };
+}
+
+function mergeSessionSources(base: StudySourceRecord[], contextFiles: UploadedFile[]): StudySourceRecord[] {
+  if (!contextFiles.length) {
+    return base;
+  }
+
+  const merged = [...base];
+  const existingKeys = new Set(base.map((source) => `${source.title.toLowerCase()}::${source.fileUrl ?? ""}`));
+
+  for (const file of contextFiles) {
+    const key = `${file.name.toLowerCase()}::${file.url}`;
+    if (!existingKeys.has(key)) {
+      merged.push(toContextSourceRecord(file));
+    }
+  }
+
+  return merged;
+}
+
+function buildChunkCountMap(
+  chunks: SourceIndexResponse["chunks"],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const chunk of chunks) {
+    counts.set(chunk.sourceId, (counts.get(chunk.sourceId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function cacheIndexedChunksInSession(
+  strategyId: string,
+  chunks: SourceIndexResponse["chunks"],
+) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    sessionStorage.setItem(`${INDEXED_CHUNKS_SESSION_CACHE_KEY}:${strategyId}`, JSON.stringify({
+      cachedAt: Date.now(),
+      chunks,
+    }));
+  } catch {
+    // best effort cache fallback
+  }
+}
+
+async function syncSourceChunkCounts(
+  uid: string,
+  strategyId: string,
+  sources: SourceIndexResponse["sources"],
+  chunks: SourceIndexResponse["chunks"],
+) {
+  const counts = buildChunkCountMap(chunks);
+  for (const source of sources) {
+    const count = counts.get(source.id) ?? source.chunkCount ?? 0;
+    await updateStudySourceChunkCount(uid, strategyId, source.id, count);
+  }
+}
+
+function humanizeSourceError(raw: string): string {
+  const value = raw.toLowerCase();
+  if (value.includes("transcript") && (value.includes("disabled") || value.includes("unavailable"))) {
+    return "Video has no captions — generating AI study version…";
+  }
+  if (value.includes("timed out") || value.includes("abort")) {
+    return "Analyzing video structure is taking longer than expected. Please retry.";
+  }
+  if (value.includes("permission_denied")) {
+    return "Could not save source metadata. Please try again.";
+  }
+  if (value.includes("missing or insufficient permissions")) {
+    return "Could not save source metadata. Please try again.";
+  }
+  if (value.includes("invalid youtube")) {
+    return "This YouTube URL looks invalid. Please check and retry.";
+  }
+  return "Could not process this source right now. Please retry.";
+}
+
+function isPermissionError(raw: string): boolean {
+  const value = raw.toLowerCase();
+  return value.includes("permission_denied") || value.includes("missing or insufficient permissions");
+}
+
+async function readSourceIndexError(response: Response): Promise<string> {
+  const text = await response.text().catch(() => "");
+  if (!text) {
+    return `Server error ${response.status}`;
+  }
+
+  try {
+    const parsed = JSON.parse(text) as { error?: string; detail?: string };
+    return parsed.detail || parsed.error || `Server error ${response.status}`;
+  } catch {
+    return text;
+  }
+}
 
 function getModelCacheKey(payload: StudyModelPayload): string {
   if (payload.modelType === "custom") {
@@ -210,6 +406,53 @@ function confidenceClass(confidence: TopicConfidence): string {
   if (confidence === "high") return "bg-emerald-500/20 text-emerald-300";
   if (confidence === "medium") return "bg-amber-500/20 text-amber-300";
   return "bg-red-500/20 text-red-300";
+}
+
+async function readSseResponse<TPayload>(
+  response: Response,
+  onEvent: (event: StreamEnvelope<TPayload>) => void,
+): Promise<void> {
+  const stream = response.body;
+  if (!stream) {
+    throw new Error("Missing response stream");
+  }
+
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+
+    for (const frame of frames) {
+      const line = frame
+        .split("\n")
+        .find((entry) => entry.startsWith("data:"));
+
+      if (!line) {
+        continue;
+      }
+
+      const raw = line.slice(5).trim();
+      if (!raw) {
+        continue;
+      }
+
+      try {
+        const event = JSON.parse(raw) as StreamEnvelope<TPayload>;
+        onEvent(event);
+      } catch {
+        // ignore malformed chunk
+      }
+    }
+  }
 }
 
 function getSessionModel(strategyId: string, fallbackModelType: "gemini" | "custom"): StudyModelPayload {
@@ -301,6 +544,7 @@ function StudyTopicPageContent() {
 
 function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const { user } = useAuth();
 
   const strategyId = searchParams.get("id");
@@ -315,8 +559,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   const [recentStrategies, setRecentStrategies] = useState<Array<{ id: string; createdAt?: string; topicCount?: number; coverage?: string }>>([]);
   const [contextFiles, setContextFiles] = useState<UploadedFile[]>([]);
   const topicOpenedAtRef = useRef<number | null>(null);
-  const [topicStatuses, setTopicStatuses] = useState<Record<string, boolean>>({});
-  const [topicSignals, setTopicSignals] = useState<Record<string, TopicSignal>>({});
   const [sessionExamDate, setSessionExamDate] = useState<string | null>(null);
 
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -337,6 +579,17 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   const [microQuizzes, setMicroQuizzes] = useState<Record<string, { loading: boolean; questions?: MicroQuizQuestion[]; citations?: SourceCitation[]; error?: string; attempted?: boolean; score?: number }>>({});
   const [examMode, setExamMode] = useState<ExamModeApiResponse | null>(null);
   const [examModeLoading, setExamModeLoading] = useState(false);
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [sourceTruthVersion, setSourceTruthVersion] = useState(0);
+  const [sources, setSources] = useState<StudySourceRecord[]>([]);
+  const [sourceAddStatus, setSourceAddStatus] = useState<SourceAddStatus>("idle");
+  const sourcesBackfillAttemptedRef = useRef(false);
+  const [, setSourceIndexLifecycle] = useState<SourceIndexLifecycle>("idle");
+
+  const setIndexLifecycle = useCallback((state: SourceIndexLifecycle) => {
+    setSourceIndexLifecycle(state);
+    console.info("[sources:index-lifecycle]", state);
+  }, []);
 
   function mapRecentStrategies(items: Awaited<ReturnType<typeof listRecentStrategies>>) {
     return items.map((item) => {
@@ -393,31 +646,10 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       setStrategy(normalized);
       setTopic(selectedTopic);
       setCompleted(Boolean(stored.studyProgress?.[topicSlug]?.completed));
-      setTopicStatuses(
-        Object.entries(stored.studyProgress ?? {}).reduce<Record<string, boolean>>(
-          (accumulator, [slug, progress]) => {
-            accumulator[slug] = Boolean(progress.completed);
-            return accumulator;
-          },
-          {},
-        ),
-      );
       setRecoveryMessage(null);
 
       const session = await getStudySessionByStrategyId(user.uid, strategyId);
       if (session) {
-        const signals = Object.entries(session.data.topicProgress ?? {}).reduce<Record<string, TopicSignal>>(
-          (accumulator, [slug, progress]) => {
-            accumulator[slug] = {
-              confidence: progress.confidence ?? 0,
-              revisitCount: progress.revisitCount ?? 0,
-              skippedCount: progress.skippedCount ?? 0,
-            };
-            return accumulator;
-          },
-          {},
-        );
-        setTopicSignals(signals);
         setSessionExamDate(session.data.examDate ?? null);
       }
 
@@ -473,6 +705,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           studyMode: "learn",
           examMode: false,
           userIntent: "topic overview and exam-focused summary",
+          userId: user.uid,
+          strategyId,
           ...resolvedModel,
         }),
       });
@@ -553,6 +787,448 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     };
   }, [completed, strategyId, topic, user]);
 
+  useEffect(() => {
+    async function loadSources() {
+      if (!user || !strategyId) {
+        return;
+      }
+
+      try {
+        const loaded = await listStudySources(user.uid, strategyId);
+        setSources(mergeSessionSources(loaded, contextFiles));
+      } catch {
+        setSources(mergeSessionSources([], contextFiles));
+      }
+    }
+
+    void loadSources();
+  }, [contextFiles, strategyId, user]);
+
+  useEffect(() => {
+    async function backfillSources() {
+      if (!user || !strategyId) {
+        return;
+      }
+      if (sourcesBackfillAttemptedRef.current) {
+        return;
+      }
+      if (sources.length > 0) {
+        sourcesBackfillAttemptedRef.current = true;
+        return;
+      }
+      if (!contextFiles.length) {
+        return;
+      }
+
+      sourcesBackfillAttemptedRef.current = true;
+
+      const toastId = toast.loading("Indexing your uploaded files…");
+      let attempts = 0;
+      const maxRetries = 1;
+      let indexed = false;
+      let lastErrorMessage = "Could not index uploaded files";
+
+      while (!indexed && attempts <= maxRetries) {
+        attempts += 1;
+
+        if (attempts > 1) {
+          toast.message("Could not index files. Retrying automatically…", { id: toastId });
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+
+        try {
+          setIndexLifecycle("preparing");
+          setIndexLifecycle("parsing");
+          const response = await fetch("/api/sources/index", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              files: contextFiles,
+              syllabusTextInput: "",
+              youtubeUrls: [],
+              websiteUrls: [],
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(await readSourceIndexError(response));
+          }
+
+          const payload = (await response.json()) as SourceIndexResponse;
+          setIndexLifecycle("chunking");
+
+          if (!payload.chunks.length) {
+            throw new Error("Parser produced zero chunks");
+          }
+
+          setIndexLifecycle("saving");
+          try {
+            for (const source of payload.sources) {
+              await upsertStudySource(user.uid, strategyId, {
+                id: source.id,
+                type: source.type,
+                title: source.title,
+                status: source.status,
+                enabled: source.enabled,
+                fileUrl: source.fileUrl,
+                youtubeUrl: source.youtubeUrl,
+                websiteUrl: source.websiteUrl,
+                videoId: source.videoId,
+                aiGeneratedTranscript: source.aiGeneratedTranscript,
+                transcriptSource: source.transcriptSource,
+                videoLanguage: source.videoLanguage,
+                translatedToEnglish: source.translatedToEnglish,
+                chunkCount: source.chunkCount,
+                errorMessage: source.errorMessage,
+              });
+            }
+
+            setIndexLifecycle("indexing");
+            try {
+              await replaceIndexedChunks(
+                user.uid,
+                strategyId,
+                payload.chunks.map((chunk) => ({
+                  sourceId: chunk.sourceId,
+                  text: chunk.text,
+                  sourceType: chunk.sourceType,
+                  sourceName: chunk.sourceName,
+                  sourceYear: chunk.sourceYear,
+                  section: chunk.section,
+                })),
+              );
+            } catch (chunkError) {
+              const chunkMessage = chunkError instanceof Error ? chunkError.message : "Index write failed";
+              if (isPermissionError(chunkMessage)) {
+                throw new Error(chunkMessage);
+              }
+
+              cacheIndexedChunksInSession(strategyId, payload.chunks);
+              toast.warning("Index writes failed — using session cache fallback", {
+                id: toastId,
+                description: "Sources remain usable in this session.",
+              });
+            }
+
+            try {
+              await syncSourceChunkCounts(user.uid, strategyId, payload.sources, payload.chunks);
+            } catch (syncError) {
+              const syncMessage = syncError instanceof Error ? syncError.message : "Chunk count sync failed";
+              if (isPermissionError(syncMessage)) {
+                throw new Error(syncMessage);
+              }
+            }
+          } catch (writeError) {
+            const writeMessage = writeError instanceof Error ? writeError.message : "Could not save source metadata";
+            throw new Error(`Could not save indexed sources: ${writeMessage}`);
+          }
+
+          setIndexLifecycle("completed");
+          const loaded = await listStudySources(user.uid, strategyId);
+          const merged = mergeSessionSources(loaded, contextFiles);
+          setSources(merged);
+          toast.success("Sources indexed", {
+            id: toastId,
+            description: `${merged.length} source${merged.length === 1 ? "" : "s"} ready`,
+          });
+          indexed = true;
+        } catch (error) {
+          lastErrorMessage = error instanceof Error ? error.message : "Could not index uploaded files";
+          setIndexLifecycle("failed");
+        }
+      }
+
+      if (!indexed) {
+        toast.error("Could not index files. Retrying automatically…", {
+          id: toastId,
+          description: `${humanizeSourceError(lastErrorMessage)} Using direct file parsing fallback. Study session still works.`,
+        });
+        setSources(mergeSessionSources([], contextFiles));
+      }
+    }
+
+    void backfillSources();
+  }, [contextFiles, setIndexLifecycle, sources.length, strategyId, user]);
+
+  const handleToggleSource = useCallback(async (sourceId: string, enabled: boolean) => {
+    if (!user || !strategyId || !topic) {
+      return;
+    }
+
+    setSources((current) =>
+      current.map((item) => (item.id === sourceId ? { ...item, enabled } : item)),
+    );
+
+    try {
+      await setStudySourceEnabled(user.uid, strategyId, sourceId, enabled);
+      setSourceTruthVersion((current) => current + 1);
+      setChatHistory([]);
+      setQuickActions({
+        difference: { loading: false, content: "" },
+        example: { loading: false, content: "" },
+        examQuestion: { loading: false, content: "" },
+        explainSimply: { loading: false, content: "" },
+      });
+      setLearnedItems({});
+      setMicroQuizzes({});
+      setExamMode(null);
+      setExpandedOriginalQuestions({});
+      setMobileChatOpen(false);
+
+      if (contextFiles.length) {
+        const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
+        const refreshed = await fetch("/api/study/topic", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic: topic.title,
+            priority: topic.priority,
+            outlineOnly: false,
+            files: contextFiles,
+            currentChapter: topic.chapterTitle,
+            examTimeRemaining,
+            studyMode: "learn",
+            examMode: false,
+            userIntent: "topic overview and exam-focused summary",
+            userId: user.uid,
+            strategyId,
+            ...modelPayload,
+          }),
+        });
+
+        if (refreshed.ok) {
+          const refreshedData = (await refreshed.json()) as TopicStudyApiResponse;
+          setStudyData(refreshedData);
+        }
+      }
+
+      toast.info("Sources updated — all content refreshed.");
+    } catch {
+      setSources((current) =>
+        current.map((item) => (item.id === sourceId ? { ...item, enabled: !enabled } : item)),
+      );
+    }
+  }, [user, strategyId, topic, contextFiles, sessionExamDate, strategy, modelPayload]);
+
+  const handleRemoveSource = useCallback(async (sourceId: string) => {
+    if (!user || !strategyId) {
+      return;
+    }
+
+    setSources((prev) => {
+      const previous = prev;
+      void (async () => {
+        try {
+          await removeStudySource(user.uid, strategyId, sourceId);
+        } catch {
+          setSources(previous);
+        }
+      })();
+      return prev.filter((item) => item.id !== sourceId);
+    });
+  }, [user, strategyId]);
+
+  const handleAddSourceFromUrl = useCallback(async (url: string, attempt = 0) => {
+    if (!user || !strategyId) {
+      return;
+    }
+
+    const raw = url.trim();
+    if (!raw) {
+      return;
+    }
+
+    const isHttp = raw.startsWith("http://") || raw.startsWith("https://");
+    const isYouTube = isHttp && (raw.includes("youtube.com") || raw.includes("youtu.be"));
+    const youtubeProgressToastId = isYouTube ? toast.loading("Fetching transcript…") : undefined;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+
+    setSourceAddStatus("validating");
+    try {
+      setSourceAddStatus(isYouTube ? "fetching-transcript" : "fetching");
+      if (youtubeProgressToastId) {
+        toast.message("Fetching transcript…", { id: youtubeProgressToastId });
+      }
+      const response = await fetch("/api/sources/index", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          files: [],
+          syllabusTextInput: isHttp ? "" : raw,
+          youtubeUrls: isYouTube ? [raw] : [],
+          websiteUrls: isHttp && !isYouTube ? [raw] : [],
+        }),
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const msg = humanizeSourceError(await readSourceIndexError(response));
+        if (attempt < 1) {
+          toast.message("Could not index files. Retrying automatically…", { description: msg });
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          return handleAddSourceFromUrl(raw, attempt + 1);
+        }
+        toast.error("Could not add source", { description: msg });
+        setSourceAddStatus("failed");
+        setTimeout(() => setSourceAddStatus("idle"), 3000);
+        return;
+      }
+
+      setSourceAddStatus(isYouTube ? "fetching-metadata" : "extracting");
+      if (youtubeProgressToastId) {
+        toast.message("Analyzing video structure…", { id: youtubeProgressToastId });
+      }
+      setSourceAddStatus("indexing");
+      if (youtubeProgressToastId) {
+        toast.message("Indexing…", { id: youtubeProgressToastId });
+      }
+      const payload = (await response.json()) as SourceIndexResponse;
+
+      const usedAiReconstruction = payload.sources.some(
+        (source) => source.type === "youtube" && source.status === "indexed" &&
+          (source.transcriptSource === "ai-reconstructed" || source.aiGeneratedTranscript),
+      );
+      if (isYouTube && usedAiReconstruction) {
+        setSourceAddStatus("ai-reconstruction");
+        if (youtubeProgressToastId) {
+          toast.message("Building study notes from video…", { id: youtubeProgressToastId });
+        }
+      }
+
+      setSourceAddStatus("chunking");
+
+      if (!payload.chunks.length) {
+        throw new Error("Parser produced zero chunks");
+      }
+
+      // Warn about any individual source errors
+      for (const source of payload.sources) {
+        if (source.status === "error" && source.errorMessage) {
+          toast.warning(source.title || "Source error", { description: source.errorMessage });
+        }
+      }
+
+      const goodSources = payload.sources.filter((s) => s.status !== "error");
+      if (!goodSources.length) {
+        if (attempt < 1) {
+          toast.message("Could not index files. Retrying automatically…");
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          return handleAddSourceFromUrl(raw, attempt + 1);
+        }
+        setSourceAddStatus("failed");
+        setTimeout(() => setSourceAddStatus("idle"), 3000);
+        return;
+      }
+
+      if (isYouTube && usedAiReconstruction) {
+        toast.message("Video has no captions — generating AI study version…", {
+          id: youtubeProgressToastId,
+        });
+      }
+
+      try {
+        for (const source of payload.sources) {
+          await upsertStudySource(user.uid, strategyId, {
+            id: source.id,
+            type: source.type,
+            title: source.title,
+            status: source.status,
+            enabled: source.enabled,
+            fileUrl: source.fileUrl,
+            youtubeUrl: source.youtubeUrl,
+            websiteUrl: source.websiteUrl,
+            videoId: source.videoId,
+            aiGeneratedTranscript: source.aiGeneratedTranscript,
+            transcriptSource: source.transcriptSource,
+            videoLanguage: source.videoLanguage,
+            translatedToEnglish: source.translatedToEnglish,
+            chunkCount: source.chunkCount,
+            errorMessage: source.errorMessage,
+          });
+        }
+
+        try {
+          await appendIndexedChunks(
+            user.uid,
+            strategyId,
+            payload.chunks.map((chunk) => ({
+              sourceId: chunk.sourceId,
+              text: chunk.text,
+              sourceType: chunk.sourceType,
+              sourceName: chunk.sourceName,
+              sourceYear: chunk.sourceYear,
+              section: chunk.section,
+            })),
+          );
+        } catch (chunkError) {
+          const chunkMessage = chunkError instanceof Error ? chunkError.message : "Index write failed";
+          if (isPermissionError(chunkMessage)) {
+            throw new Error(chunkMessage);
+          }
+
+          cacheIndexedChunksInSession(strategyId, payload.chunks);
+          toast.warning("Index writes failed — using session cache fallback", {
+            id: youtubeProgressToastId,
+            description: "Source is still available for this session.",
+          });
+        }
+
+        try {
+          await syncSourceChunkCounts(user.uid, strategyId, payload.sources, payload.chunks);
+        } catch (syncError) {
+          const syncMessage = syncError instanceof Error ? syncError.message : "Chunk count sync failed";
+          if (isPermissionError(syncMessage)) {
+            throw new Error(syncMessage);
+          }
+        }
+      } catch (writeError) {
+        const message = writeError instanceof Error ? humanizeSourceError(writeError.message) : "Could not save source metadata";
+        toast.error("Could not save source data", {
+          id: youtubeProgressToastId,
+          description: message,
+        });
+        setSourceAddStatus("failed");
+        setTimeout(() => setSourceAddStatus("idle"), 3000);
+        return;
+      }
+
+      const refreshed = await listStudySources(user.uid, strategyId);
+      setSources(mergeSessionSources(refreshed, contextFiles));
+      setSourceAddStatus("completed");
+      toast.success("Source added", {
+        id: youtubeProgressToastId,
+        description: goodSources[0]?.title ?? "Ready to use in your study session",
+      });
+      setTimeout(() => setSourceAddStatus("idle"), 2000);
+    } catch (err) {
+      clearTimeout(timeout);
+      const isAbort = err instanceof Error && err.name === "AbortError";
+      if (attempt < 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        return handleAddSourceFromUrl(raw, attempt + 1);
+      }
+      toast.error(
+        isYouTube ? "Could not process this video" : "Could not add source",
+        {
+          id: youtubeProgressToastId,
+          description: isAbort
+            ? "Building study notes from video took too long. Please retry."
+            : (isYouTube
+              ? "All processing methods failed for this video. Please try a different URL."
+              : err instanceof Error
+                ? humanizeSourceError(err.message)
+                : "Could not process this source right now. Please retry."),
+        },
+      );
+      setSourceAddStatus("failed");
+      setTimeout(() => setSourceAddStatus("idle"), 3000);
+    }
+  }, [contextFiles, strategyId, user]);
+
   const activeChapter = useMemo(() => {
     if (!strategy || !topic) {
       return null;
@@ -573,93 +1249,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       };
     }
 
-    const parseWeightage = (weightage?: string): number => {
-      if (!weightage) {
-        return 0;
-      }
-
-      const match = weightage.match(/(\d+(?:\.\d+)?)/);
-      return match ? Number.parseFloat(match[1]) : 0;
-    };
-
-    const priorityScore = (priority: StudyTopic["priority"]): number => {
-      if (priority === "high") return 35;
-      if (priority === "medium") return 22;
-      return 10;
-    };
-
-    const hoursLeft = strategy.strategySummary?.hoursLeft ?? 6;
-    const timeRemainingFactor = (priority: StudyTopic["priority"]) => {
-      if (hoursLeft <= 6) {
-        return priority === "high" ? 20 : priority === "medium" ? 12 : 6;
-      }
-
-      if (hoursLeft <= 12) {
-        return priority === "high" ? 14 : priority === "medium" ? 9 : 5;
-      }
-
-      return priority === "high" ? 10 : priority === "medium" ? 7 : 4;
-    };
-
-    const chapterByNumber = new Map(strategy.chapters.map((chapter) => [chapter.chapterNumber, chapter]));
-
-    const examDateFactor = (() => {
-      if (!sessionExamDate) {
-        return 0;
-      }
-
-      const examAt = new Date(sessionExamDate).getTime();
-      if (Number.isNaN(examAt)) {
-        return 0;
-      }
-
-      const days = Math.max(0, Math.round((examAt - Date.now()) / (1000 * 60 * 60 * 24)));
-      if (days <= 3) return 22;
-      if (days <= 7) return 14;
-      if (days <= 14) return 8;
-      return 4;
-    })();
-
-    const ranked = strategy.topics
-      .filter((candidate) => candidate.slug !== topic.slug)
-      .filter((candidate) => !topicStatuses[candidate.slug])
-      .map((candidate) => {
-        const chapter = candidate.chapterNumber ? chapterByNumber.get(candidate.chapterNumber) : undefined;
-        const signal = topicSignals[candidate.slug];
-        const examLikelihood = candidate.examLikelihoodScore ?? 0;
-        const chapterWeightage = parseWeightage(chapter?.weightage);
-        const unfinishedStatus = topicStatuses[candidate.slug] ? 0 : 18;
-        const lowConfidenceBoost = Math.max(0, 100 - (signal?.confidence ?? 0)) * 0.28;
-        const revisitBoost = (signal?.revisitCount ?? 0) * 5;
-        const skippedBoost = (signal?.skippedCount ?? 0) * 6;
-        const score =
-          examLikelihood +
-          chapterWeightage +
-          unfinishedStatus +
-          priorityScore(candidate.priority) +
-          timeRemainingFactor(candidate.priority) +
-          lowConfidenceBoost +
-          revisitBoost +
-          skippedBoost +
-          examDateFactor;
-
-        const reasons: string[] = [];
-        if (examLikelihood >= 70) reasons.push("high exam probability");
-        if ((signal?.confidence ?? 0) <= 45) reasons.push("low confidence");
-        if ((signal?.revisitCount ?? 0) >= 1) reasons.push("needs revisit");
-        if ((signal?.skippedCount ?? 0) >= 1) reasons.push("recently skipped");
-        return {
-          candidate,
-          score,
-          reason: reasons.length ? reasons.slice(0, 2).join(" + ") : "highest blended score",
-        };
-      })
-      .sort((a, b) => b.score - a.score);
-
-    const recommended = ranked[0] ?? null;
-    const recommendedNextTopic = recommended?.candidate ?? null;
-    const recommendedReason = recommended ? `Reason: ${recommended.reason}` : "";
-
     const chapterTopics = activeChapter.topics;
     const topicIndex = chapterTopics.findIndex((item) => item.slug === topic.slug);
     const nextTopicInChapter = topicIndex >= 0 ? chapterTopics[topicIndex + 1] ?? null : null;
@@ -676,27 +1265,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
     return { nextTopicInChapter, nextChapterStart };
   }, [activeChapter, strategy, topic]);
-
-  const topicProgressLabel = useMemo(() => {
-    if (!activeChapter || !topic) {
-      return null;
-    }
-
-    const chapterTopics = activeChapter.topics;
-    const index = chapterTopics.findIndex((item) => item.slug === topic.slug);
-    if (index < 0) {
-      return null;
-    }
-
-    return `Topic ${index + 1} / ${chapterTopics.length}`;
-  }, [activeChapter, topic]);
-
-  const globalProgress = useMemo(() => {
-    if (!strategy) return { completed: 0, total: 0, percent: 0 };
-    const total = strategy.topics.length;
-    const completed = Object.values(topicStatuses).filter(Boolean).length;
-    return { completed, total, percent: total ? Math.round((completed / total) * 100) : 0 };
-  }, [strategy, topicStatuses]);
 
   async function runQuickAction(action: QuickActionKey) {
     if (!strategyId || !topic || !user) {
@@ -742,6 +1310,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           studyMode: "quick_action",
           examMode: false,
           userIntent: action,
+          userId: user.uid,
+          strategyId,
           ...modelPayload,
         }),
       });
@@ -781,7 +1351,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     }
   }
 
-  async function handleAsk(overrideQuestion?: string) {
+  const handleAsk = useCallback(async (overrideQuestion?: string) => {
     const resolvedQuestion = (overrideQuestion ?? "").trim();
 
     if (!strategyId || !topic || !resolvedQuestion || !user) {
@@ -809,10 +1379,10 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       ...stored.previousPaperFiles,
     ]
       .map((file) => file.url)
-      .join("|")}`;
+      .join("|")}:source-truth:${sourceTruthVersion}`;
 
     const modelKey = getModelCacheKey(modelPayload);
-    const cacheKey = `${topic.slug}:${resolvedQuestion}:${modelKey}`;
+    const cacheKey = `${topic.slug}:${resolvedQuestion}:${modelKey}:source-truth:${sourceTruthVersion}`;
 
     const cachedChat = await getChatCacheFromSession(
       user.uid,
@@ -831,6 +1401,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           content: cachedChat.answer,
           confidence: cachedChat.confidence,
           citations: cachedChat.citations as SourceCitation[],
+          usedVideoContext: cachedChat.usedVideoContext,
         },
       ]);
       void recordAiTelemetryInSession(user.uid, strategyId, {
@@ -839,6 +1410,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         latencyMs: 0,
         cacheHit: true,
         fallbackTriggered: false,
+        usedVideoContext: Boolean(cachedChat.usedVideoContext),
       });
       setAsking(false);
       return;
@@ -861,6 +1433,9 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           studyMode: "chat",
           examMode: false,
           userIntent: resolvedQuestion,
+          userId: user.uid,
+          strategyId,
+          stream: true,
           ...modelPayload,
         }),
       });
@@ -873,34 +1448,10 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         return;
       }
 
-      const data = (await response.json()) as TopicAskApiResponse;
-      if (data.routingMeta) {
-        void recordAiTelemetryInSession(user.uid, strategyId, {
-          taskType: data.routingMeta.taskType,
-          modelUsed: data.routingMeta.modelUsed,
-          latencyMs: data.routingMeta.latencyMs,
-          cacheHit: false,
-          fallbackTriggered: data.routingMeta.fallbackTriggered,
-          fallbackReason: data.routingMeta.fallbackReason,
-        });
-      }
-
-      void saveChatCacheToSession(user.uid, strategyId, cacheKey, {
-        signature: fileSignature,
-        schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
-        model: modelKey,
-        answer: data.answer,
-        confidence: data.confidence,
-        citations: (data.citations ?? []).map((citation) => ({
-          sourceType: citation.sourceType,
-          sourceName: citation.sourceName,
-          sourceYear: citation.sourceYear,
-          importanceLevel: citation.importanceLevel,
-        })),
-      });
-
-      const fullAnswer = data.answer?.trim() ? data.answer : FALLBACK_MESSAGE;
+      const isSse = response.headers.get("content-type")?.includes("text/event-stream");
       const assistantId = `${Date.now()}-assistant`;
+      let streamedAnswer = "";
+      let data: TopicAskApiResponse | null = null;
 
       setChatHistory((current) => [
         ...current,
@@ -908,46 +1459,90 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           id: assistantId,
           role: "assistant",
           content: "",
-          confidence: data.confidence,
-          citations: data.citations ?? [],
+          confidence: "low",
+          citations: [],
         },
       ]);
 
-      const chunkSize = Math.max(8, Math.min(28, Math.ceil(fullAnswer.length / 22)));
-      for (let cursor = chunkSize; cursor < fullAnswer.length; cursor += chunkSize) {
-        await new Promise<void>((resolve) => {
-          setTimeout(() => resolve(), 14);
-        });
+      if (isSse) {
+        await readSseResponse<TopicAskApiResponse>(response, (event) => {
+          if (event.type === "delta" && event.chunk) {
+            streamedAnswer += event.chunk;
+            setChatHistory((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      content: streamedAnswer,
+                    }
+                  : message,
+              ),
+            );
+            return;
+          }
 
-        const partial = fullAnswer.slice(0, cursor);
-        setChatHistory((current) =>
-          current.map((message) =>
-            message.id === assistantId
-              ? {
-                  ...message,
-                  content: partial,
-                }
-              : message,
-          ),
-        );
+          if (event.type === "done" && event.payload) {
+            data = event.payload;
+          }
+        });
+      } else {
+        data = (await response.json()) as TopicAskApiResponse;
       }
 
+      const finalData: TopicAskApiResponse = data ?? {
+        answer: streamedAnswer || FALLBACK_MESSAGE,
+        confidence: "low",
+        citations: [],
+        usedVideoContext: false,
+      };
+
+      const fullAnswer = finalData.answer?.trim() ? finalData.answer : streamedAnswer || FALLBACK_MESSAGE;
       setChatHistory((current) =>
         current.map((message) =>
           message.id === assistantId
             ? {
                 ...message,
                 content: fullAnswer,
+                confidence: finalData.confidence,
+                citations: finalData.citations ?? [],
+                usedVideoContext: finalData.usedVideoContext,
               }
             : message,
         ),
       );
+
+      if (finalData.routingMeta) {
+        void recordAiTelemetryInSession(user.uid, strategyId, {
+          taskType: finalData.routingMeta.taskType,
+          modelUsed: finalData.routingMeta.modelUsed,
+          latencyMs: finalData.routingMeta.latencyMs,
+          cacheHit: false,
+          fallbackTriggered: finalData.routingMeta.fallbackTriggered,
+          fallbackReason: finalData.routingMeta.fallbackReason,
+          usedVideoContext: Boolean(finalData.usedVideoContext),
+        });
+      }
+
+      void saveChatCacheToSession(user.uid, strategyId, cacheKey, {
+        signature: fileSignature,
+        schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
+        model: modelKey,
+        answer: fullAnswer,
+        confidence: finalData.confidence,
+        usedVideoContext: finalData.usedVideoContext,
+        citations: (finalData.citations ?? []).map((citation) => ({
+          sourceType: citation.sourceType,
+          sourceName: citation.sourceName,
+          sourceYear: citation.sourceYear,
+          importanceLevel: citation.importanceLevel,
+        })),
+      });
     } finally {
       setAsking(false);
     }
-  }
+  }, [user, strategyId, topic, chatHistory, modelPayload, activeChapter, sessionExamDate, strategy, sourceTruthVersion]);
 
-  async function handleMarkCompleted() {
+  const handleMarkCompleted = useCallback(async () => {
     if (!user || !strategyId || !topic) return;
 
     try {
@@ -959,25 +1554,11 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         markTopicCompletedInSession(user.uid, strategyId, topic.slug, elapsedSeconds, 80),
       ]);
 
-      setTopicSignals((current) => ({
-        ...current,
-        [topic.slug]: {
-          confidence: 80,
-          revisitCount: current[topic.slug]?.revisitCount ?? 0,
-          skippedCount: current[topic.slug]?.skippedCount ?? 0,
-        },
-      }));
-
-      setTopicStatuses((current) => ({
-        ...current,
-        [topic.slug]: true,
-      }));
-
       setCompleted(true);
     } catch {
       // no-op fallback
     }
-  }
+  }, [user, strategyId, topic]);
 
   async function handleLearnNow(item: string, index: number) {
     if (!topic || !contextFiles.length || !user || !strategyId) {
@@ -995,8 +1576,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     }));
 
     try {
-      const signature = `${STUDY_CACHE_SCHEMA_VERSION}:${contextFiles.map((file) => file.url).join("|")}`;
-      const answerCacheKey = `${topic.slug}:${item}`;
+      const signature = `${STUDY_CACHE_SCHEMA_VERSION}:${contextFiles.map((file) => file.url).join("|")}:source-truth:${sourceTruthVersion}`;
+      const answerCacheKey = `${topic.slug}:${item}:source-truth:${sourceTruthVersion}`;
       const cachedLearnAnswer = await getStudyAnswerCacheFromSession(
         user.uid,
         strategyId,
@@ -1044,6 +1625,9 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           studyMode: "learn_now",
           examMode: false,
           userIntent: item,
+          userId: user.uid,
+          strategyId,
+          stream: true,
           ...modelPayload,
         }),
       });
@@ -1056,20 +1640,64 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         return;
       }
 
-      const content = (await response.json()) as LearnItemApiResponse;
+      const isSse = response.headers.get("content-type")?.includes("text/event-stream");
+      let streamedFullAnswer = "";
+      let content: LearnItemApiResponse | null = null;
+
+      if (isSse) {
+        await readSseResponse<LearnItemApiResponse>(response, (event) => {
+          if (event.type === "delta" && event.chunk) {
+            streamedFullAnswer += event.chunk;
+            setLearnedItems((current) => ({
+              ...current,
+              [key]: {
+                loading: false,
+                content: {
+                  conceptExplanation: "Generating explanation...",
+                  example: "Generating example...",
+                  examTip: "Generating exam tip...",
+                  typicalExamQuestion: "Generating exam-style question...",
+                  fullAnswer: streamedFullAnswer,
+                  confidence: "low",
+                  citations: [],
+                },
+              },
+            }));
+            return;
+          }
+
+          if (event.type === "done" && event.payload) {
+            content = event.payload;
+          }
+        });
+      } else {
+        content = (await response.json()) as LearnItemApiResponse;
+      }
+
+      const finalContent: LearnItemApiResponse =
+        content ?? {
+          conceptExplanation: "Not found in uploaded material.",
+          example: "",
+          examTip: "Focus on exam language and concise point-wise answers.",
+          typicalExamQuestion: `Explain ${item} with exam relevance.`,
+          fullAnswer: streamedFullAnswer || "Not found in uploaded material.",
+          confidence: "low",
+          citations: [],
+        };
+
       void saveStudyAnswerCacheToSession(user.uid, strategyId, answerCacheKey, {
         signature,
         schemaVersion: STUDY_CACHE_SCHEMA_VERSION,
-        model: content.routingMeta?.modelUsed ?? getModelCacheKey(modelPayload),
+        model: finalContent.routingMeta?.modelUsed ?? getModelCacheKey(modelPayload),
         item,
         answer: {
-          conceptExplanation: content.conceptExplanation,
-          example: content.example,
-          examTip: content.examTip,
-          typicalExamQuestion: content.typicalExamQuestion,
-          fullAnswer: content.fullAnswer,
-          confidence: content.confidence,
-          citations: (content.citations ?? []).map((citation) => ({
+          conceptExplanation: finalContent.conceptExplanation,
+          example: finalContent.example,
+          examTip: finalContent.examTip,
+          typicalExamQuestion: finalContent.typicalExamQuestion,
+          fullAnswer: finalContent.fullAnswer,
+          confidence: finalContent.confidence,
+          citations: (finalContent.citations ?? []).map((citation) => ({
             sourceType: citation.sourceType,
             sourceName: citation.sourceName,
             sourceYear: citation.sourceYear,
@@ -1077,19 +1705,19 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           })),
         },
       });
-      if (content.routingMeta && user && strategyId) {
+      if (finalContent.routingMeta && user && strategyId) {
         void recordAiTelemetryInSession(user.uid, strategyId, {
-          taskType: content.routingMeta.taskType,
-          modelUsed: content.routingMeta.modelUsed,
-          latencyMs: content.routingMeta.latencyMs,
+          taskType: finalContent.routingMeta.taskType,
+          modelUsed: finalContent.routingMeta.modelUsed,
+          latencyMs: finalContent.routingMeta.latencyMs,
           cacheHit: false,
-          fallbackTriggered: content.routingMeta.fallbackTriggered,
-          fallbackReason: content.routingMeta.fallbackReason,
+          fallbackTriggered: finalContent.routingMeta.fallbackTriggered,
+          fallbackReason: finalContent.routingMeta.fallbackReason,
         });
       }
       setLearnedItems((current) => ({
         ...current,
-        [key]: { loading: false, content },
+        [key]: { loading: false, content: finalContent },
       }));
     } catch {
       setLearnedItems((current) => ({
@@ -1119,6 +1747,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           studyMode: "exam_mode",
           examMode: true,
           userIntent: "generate likely exam questions",
+          userId: user?.uid,
+          strategyId,
           ...modelPayload,
         }),
       });
@@ -1146,15 +1776,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           score: data.readinessScore,
           durationSeconds: 120,
         });
-
-        setTopicSignals((current) => ({
-          ...current,
-          [topic.slug]: {
-            confidence: data.readinessScore,
-            revisitCount: current[topic.slug]?.revisitCount ?? 0,
-            skippedCount: current[topic.slug]?.skippedCount ?? 0,
-          },
-        }));
       }
     } finally {
       setExamModeLoading(false);
@@ -1185,6 +1806,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           studyMode: "micro_quiz",
           examMode: false,
           userIntent: "generate short quiz",
+          userId: user?.uid,
+          strategyId,
           ...modelPayload,
         }),
       });
@@ -1242,15 +1865,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         score,
       },
     }));
-
-    setTopicSignals((current) => ({
-      ...current,
-      [topic.slug]: {
-        confidence: score,
-        revisitCount: current[topic.slug]?.revisitCount ?? 0,
-        skippedCount: current[topic.slug]?.skippedCount ?? 0,
-      },
-    }));
   }
 
   if (loading) {
@@ -1266,7 +1880,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   if (!topic || !studyData || !strategy) {
     return (
       <div className="min-h-screen bg-[#050505] text-white selection:bg-indigo-500/30 overflow-hidden relative">
-        <AuthenticatedNavBar strategyId={strategyId} topicSlug={topicSlug} />
+        <AuthenticatedNavBar strategyId={strategyId} topicSlug={topicSlug} hideNavOnMobile />
         <div className="relative z-10 pt-20">
           <StrategyRecoveryView
             title="Study context missing"
@@ -1291,59 +1905,55 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       : "Back to Dashboard";
   const hasNextStep = Boolean(nextFlow.nextTopicInChapter || nextFlow.nextChapterStart);
 
+  const handleBackToDashboard = () => {
+    router.push(strategyId ? `/dashboard?id=${strategyId}` : "/dashboard");
+  };
+
+  const handleMoveNext = () => {
+    router.push(nextHref);
+  };
+
   return (
-    <div className="h-screen bg-[#050505] text-white selection:bg-orange-500/20 overflow-hidden flex flex-col relative">
-      <AuthenticatedNavBar strategyId={strategyId} topicSlug={topicSlug} />
+    <div className="h-screen w-full max-w-full bg-[#050505] text-white selection:bg-orange-500/20 overflow-x-hidden overflow-y-hidden flex flex-col relative">
+      <AuthenticatedNavBar strategyId={strategyId} topicSlug={topicSlug} hideNavOnMobile />
       <div className="h-20 flex-shrink-0 pointer-events-none" aria-hidden="true" />
 
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <motion.div
-          animate={{ scale: [1, 1.2, 1], opacity: [0.15, 0.3, 0.15] }}
-          transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
-          className="absolute -top-[10%] -left-[10%] w-[60%] h-[60%] rounded-full blur-[120px]"
-          style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.15) 0%, transparent 70%)" }}
+        <div
+          className="hidden md:block absolute -top-[10%] -left-[10%] w-[60%] h-[60%] rounded-full blur-[80px]"
+          style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.1) 0%, transparent 70%)" }}
         />
       </div>
 
       <div className="relative z-10 flex-1 flex min-h-0 overflow-hidden">
         <div className="flex flex-1 min-h-0">
-          <div className="flex-1 overflow-y-auto min-w-0 px-4 md:px-8 pt-6 pb-28 space-y-5">
-            <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-5 md:p-6">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  {activeChapter ? (
-                    <p className="text-sm text-indigo-200/90">
-                      Chapter {activeChapter.chapterNumber}: {activeChapter.chapterTitle}
-                    </p>
-                  ) : null}
-                  <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-white mt-1">Topic: {topic.title}</h1>
-                  <p className="text-neutral-400 mt-2">Structured notes from your uploaded material.</p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Badge className="bg-indigo-500/20 text-indigo-200 border-none capitalize">{topic.priority} priority</Badge>
-                  <Badge className="bg-white/10 text-white border-none">{studyData.estimatedTime}</Badge>
-                  {typeof studyData.materialCoverage === "number" ? (
-                    <Badge className="bg-blue-500/20 text-blue-200 border-none">Coverage: {studyData.materialCoverage}%</Badge>
-                  ) : null}
-                  {typeof studyData.examLikelihoodScore === "number" ? (
-                    <Badge className="bg-fuchsia-500/20 text-fuchsia-200 border-none">
-                      🔥 Exam Likelihood: {studyData.examLikelihoodScore}% {studyData.examLikelihoodLabel ? `(${studyData.examLikelihoodLabel})` : ""}
-                    </Badge>
-                  ) : null}
-                  <Badge className={`${confidenceClass(studyData.confidence)} border-none capitalize`}>
-                    Confidence: {studyData.confidence}
-                  </Badge>
-                  {studyData.lowMaterialConfidence ? (
-                    <Badge className="bg-amber-500/20 text-amber-200 border-none">
-                      Low material confidence — upload more notes.
-                    </Badge>
-                  ) : null}
-                  {completed ? <Badge className="bg-emerald-500/20 text-emerald-200 border-none">Completed</Badge> : null}
-                </div>
-              </div>
-            </div>
+          <div className="flex-1 overflow-y-auto min-w-0 px-4 md:px-8 pt-6 pb-6 md:pb-10 space-y-4">
+            <StudyTopicHero
+              topicTitle={topic.title}
+              chapterLabel={
+                activeChapter
+                  ? `Chapter ${activeChapter.chapterNumber}: ${activeChapter.chapterTitle}`
+                  : undefined
+              }
+              estimatedTime={studyData.estimatedTime}
+              examLikelihoodScore={studyData.examLikelihoodScore}
+              examLikelihoodLabel={studyData.examLikelihoodLabel}
+              onBack={handleBackToDashboard}
+              onComplete={() => void handleMarkCompleted()}
+              onNext={hasNextStep ? handleMoveNext : undefined}
+              nextLabel={nextLabel}
+              isCompleted={completed}
+            />
 
-            <Card className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl">
+            <StudySourcesCard
+              sources={sources}
+              addStatus={sourceAddStatus}
+              onAddSource={handleAddSourceFromUrl}
+              onToggleSource={handleToggleSource}
+              onRemoveSource={handleRemoveSource}
+            />
+
+            <Card className="bg-white/5 border border-white/10 backdrop-blur-sm md:backdrop-blur-xl shadow-2xl rounded-3xl">
               <CardHeader>
                 <CardTitle className="text-white text-xl">What to Learn</CardTitle>
               </CardHeader>
@@ -1371,6 +1981,21 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                           </div>
 
                           {learned?.error ? <p className="mt-2 text-xs text-red-300">{learned.error}</p> : null}
+
+                          {learned?.loading && !learned?.content ? (
+                            <div className="mt-3 rounded-xl bg-black/35 border border-white/10 p-3 space-y-3 animate-pulse">
+                              <div className="space-y-2">
+                                <div className="h-3 w-32 rounded bg-white/10" />
+                                <div className="h-3 w-full rounded bg-white/10" />
+                                <div className="h-3 w-11/12 rounded bg-white/10" />
+                              </div>
+                              <div className="space-y-2">
+                                <div className="h-3 w-24 rounded bg-white/10" />
+                                <div className="h-3 w-10/12 rounded bg-white/10" />
+                              </div>
+                              <div className="h-3 w-20 rounded bg-white/10" />
+                            </div>
+                          ) : null}
 
                           {learned?.content ? (
                             <div className="mt-3 rounded-xl bg-black/35 border border-white/10 p-3 space-y-3">
@@ -1604,11 +2229,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
                     <div key={item.key} className="rounded-2xl bg-black/25 border border-white/10 p-4">
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-xs uppercase tracking-wide text-indigo-200/80">{item.title}</p>
-                        {quickActions[item.key].confidence ? (
-                          <Badge className={`${confidenceClass(quickActions[item.key].confidence as TopicConfidence)} border-none capitalize`}>
-                            {quickActions[item.key].confidence}
-                          </Badge>
-                        ) : null}
                       </div>
                       <p className="mt-2">{quickActions[item.key].content}</p>
                     </div>
@@ -1616,174 +2236,70 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
               </CardContent>
             </Card>
 
-            <Card className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl">
-              <CardHeader>
-                <CardTitle className="text-white text-xl">Key Exam Points</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {studyData.keyExamPoints.length ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {studyData.keyExamPoints.map((item, index) => (
-                      <div key={`${item}-${index}`} className="rounded-xl bg-indigo-500/10 border border-indigo-400/20 px-3 py-3 text-sm text-indigo-50 leading-6">
-                        {item}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-neutral-300 text-sm">{FALLBACK_MESSAGE}</p>
-                )}
-
-                {examMode ? (
-                  <div className="mt-5 space-y-3 rounded-2xl bg-black/25 border border-white/10 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-sm font-semibold text-white">Exam Mode Snapshot</p>
-                      <Badge className={`${confidenceClass(examMode.confidence)} border-none capitalize`}>
-                        Readiness: {examMode.readinessScore}/100
-                      </Badge>
-                    </div>
-
-                    <div className="space-y-2">
-                      {examMode.likelyQuestions.map((question, index) => (
-                        <div key={`${question.question}-${index}`} className="rounded-xl border border-white/10 bg-white/5 p-3">
-                          <p className="text-sm text-white font-medium">Q{index + 1}. {question.question}</p>
-                          <p className="mt-1 text-xs text-neutral-300">Expected: {question.expectedAnswer}</p>
-                          <p className="mt-1 text-[11px] text-neutral-400">
-                            Difficulty: {question.difficulty} • Time: {question.timeLimitMinutes} min
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-
-                    {examMode.weakAreas.length ? (
-                      <div>
-                        <p className="text-xs uppercase tracking-wide text-indigo-200/80 mb-2">Weak Areas</p>
-                        <ul className="list-disc pl-5 space-y-1 text-xs text-neutral-300">
-                          {examMode.weakAreas.map((item, index) => (
-                            <li key={`${item}-${index}`}>{item}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-
-                    <p className="text-xs text-indigo-100">Tip: {examMode.examTip}</p>
-                  </div>
-                ) : null}
-              </CardContent>
-            </Card>
+            <StudyKeyExamCard
+              keyExamPoints={studyData.keyExamPoints}
+              fallbackMessage={FALLBACK_MESSAGE}
+              examMode={examMode}
+              confidenceClass={confidenceClass}
+            />
           </div>
 
-          <div className="hidden lg:flex w-[380px] xl:w-[420px] flex-shrink-0 flex-col px-4 pt-4 pb-[68px]">
-            <Card className="flex-1 flex flex-col min-h-0 rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl shadow-2xl overflow-hidden">
-              <CardHeader className="px-5 pt-5 pb-3 flex-shrink-0 border-b border-white/[0.07]">
-                <CardTitle className="text-white text-base font-semibold tracking-tight">Ask about this topic</CardTitle>
-              </CardHeader>
-              <CardContent className="flex-1 flex flex-col gap-3 min-h-0 overflow-hidden px-4 py-4">
-                <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
-                  {chatHistory.length ? (
-                    chatHistory.map((message) => (
-                      <div
-                        key={message.id}
-                        className={`rounded-xl px-3 py-2 text-sm leading-6 border ${
-                          message.role === "user"
-                            ? "bg-orange-500/15 border-orange-400/25 text-orange-50"
-                            : "bg-black/25 border-white/10 text-neutral-100"
-                        }`}
-                      >
-                        <MarkdownRenderer content={message.content} />
-                        {message.role === "assistant" && message.confidence ? (
-                          <p className="text-[11px] text-neutral-400 mt-1 capitalize">Confidence: {message.confidence}</p>
-                        ) : null}
-                        {message.role === "assistant" && message.citations?.length ? (
-                          <div className="mt-2 flex flex-wrap gap-1">
-                            {message.citations.slice(0, 3).map((citation, index) => (
-                              <span
-                                key={`${citation.sourceName}-${index}`}
-                                className="text-[10px] rounded-xl bg-white/10 px-2 py-1 text-neutral-300 leading-snug"
-                              >
-                                {citation.sourceType}: {citation.sourceName}
-                                {citation.sourceYear ? ` (${citation.sourceYear})` : ""}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    ))
-                  ) : (
-                    <p className="text-sm text-neutral-400">Ask a question and get concise, topic-specific answers.</p>
-                  )}
-                  <div ref={chatEndRef} />
-                </div>
-
-                <div className="pt-1 pb-1">
-                  <AnimatedGlowingBorder className="w-full h-[62px]" innerClassName="h-full bg-[#010201]">
-                    <AIInputWithLoading
-                      id="study-topic-chat"
-                      placeholder="Ask about this topic"
-                      loadingDuration={1200}
-                      thinkingDuration={500}
-                      minHeight={56}
-                      className="py-0"
-                      textareaClassName="h-[56px] min-h-[56px] rounded-lg bg-[#010201] dark:bg-[#010201] text-white placeholder:text-neutral-400"
-                      onSubmit={async (value) => {
-                        await handleAsk(value);
-                      }}
-                      disabled={asking}
-                      showStatusText={false}
-                    />
-                  </AnimatedGlowingBorder>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
+          <DesktopStudyChatPanel
+            chatHistory={chatHistory}
+            asking={asking}
+            onSubmit={handleAsk}
+            chatEndRef={chatEndRef}
+          />
         </div>
       </div>
 
-      <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-white/10 bg-black/70 backdrop-blur-xl">
-        <div className="mx-auto max-w-[1400px] px-4 md:px-6 py-3 flex items-center justify-between gap-3">
-          <Button asChild variant="outline" className="rounded-full border-white/10 bg-white/5 text-white hover:bg-white/10 hover:border-white/20 transition-all">
-            <Link href={`/dashboard?id=${strategyId}`}>Back to Dashboard</Link>
+      {/* Desktop bottom navigation bar */}
+      <div className="hidden md:flex flex-shrink-0 items-center justify-between gap-4 px-8 py-3 border-t border-white/10 bg-[#050505]/90 backdrop-blur-sm z-20">
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={handleBackToDashboard}
+          className="flex items-center gap-2 text-neutral-300 hover:text-white hover:bg-white/10 rounded-full px-4"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Dashboard
+        </Button>
+        <div className="flex items-center gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void handleMarkCompleted()}
+            className={`flex items-center gap-2 rounded-full border-white/10 px-5 ${
+              completed
+                ? "bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30 border-emerald-500/30"
+                : "bg-white/5 text-white hover:bg-white/10"
+            }`}
+          >
+            <Check className="h-4 w-4" />
+            {completed ? "Completed" : "Mark Complete"}
           </Button>
-
-          <div className="hidden md:flex items-center gap-4">
-            <div className="flex items-center gap-3">
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] text-neutral-400 tabular-nums">{globalProgress.completed}/{globalProgress.total} topics</span>
-                  <span className="text-[10px] text-neutral-500">{globalProgress.percent}%</span>
-                </div>
-                <div className="w-36 h-1 rounded-full bg-white/10 overflow-hidden">
-                  <div className="h-full bg-orange-500 rounded-full transition-all duration-500" style={{ width: `${globalProgress.percent}%` }} />
-                </div>
-              </div>
-              {topicProgressLabel ? (
-                <span className="text-[11px] text-neutral-400 tabular-nums border-l border-white/10 pl-4">
-                  {topicProgressLabel}
-                </span>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
+          {hasNextStep ? (
             <Button
               type="button"
-              onClick={handleMarkCompleted}
-              className="rounded-full bg-orange-500 hover:bg-orange-400 text-white shadow-[0_0_16px_rgba(249,115,22,0.2)] hover:shadow-[0_0_24px_rgba(249,115,22,0.35)] transition-all"
-              disabled={completed}
+              variant="outline"
+              onClick={handleMoveNext}
+              className="flex items-center gap-2 rounded-full border-white/10 bg-white/5 text-white hover:bg-white/10 px-5"
             >
-              {completed ? "Completed" : "Mark as Completed"}
+              {nextLabel}
+              <ArrowRight className="h-4 w-4" />
             </Button>
-            <Button
-              asChild
-              className="rounded-full bg-white hover:bg-neutral-100 text-[#080808] shadow-[0_2px_16px_rgba(255,255,255,0.12)] transition-all"
-              disabled={!hasNextStep}
-            >
-              <Link href={nextHref}>
-                {nextLabel} →
-              </Link>
-            </Button>
-          </div>
+          ) : null}
         </div>
       </div>
+
+      <MobileStudyChatPanel
+        open={mobileChatOpen}
+        chatHistory={chatHistory}
+        asking={asking}
+        onSubmit={handleAsk}
+        onToggle={() => setMobileChatOpen((current) => !current)}
+        onClose={() => setMobileChatOpen(false)}
+      />
     </div>
   );
 }

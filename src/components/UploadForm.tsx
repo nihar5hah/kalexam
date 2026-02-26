@@ -12,6 +12,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CustomProviderConfig, FileCategory, ModelType, StrategyResult, UploadedFile } from "@/lib/ai/types";
 import { FAST_MODEL } from "@/lib/ai/modelRouter";
 import { getFirebaseStorage } from "@/lib/firebase";
+import { replaceIndexedChunks } from "@/lib/firestore/chunks";
+import { upsertStudySource } from "@/lib/firestore/sources";
 import { createStrategy, saveStudyTopicCache } from "@/lib/firestore/strategies";
 import {
   createStudySession,
@@ -48,6 +50,36 @@ type StrategyJobStatusApiResponse = {
     strategy?: StrategyResult;
     updatedAt: number;
   };
+};
+
+type IndexedSourceApiRecord = {
+  id: string;
+  type: "pdf" | "ppt" | "docx" | "text" | "youtube" | "url";
+  title: string;
+  status: "indexed" | "error";
+  enabled: boolean;
+  fileUrl?: string;
+  youtubeUrl?: string;
+  websiteUrl?: string;
+  videoId?: string;
+  aiGeneratedTranscript?: boolean;
+  transcriptSource?: "captions" | "ai-reconstructed";
+  videoLanguage?: "english" | "hindi" | "other";
+  translatedToEnglish?: boolean;
+  chunkCount: number;
+  errorMessage?: string;
+};
+
+type SourceIndexResponse = {
+  sources: IndexedSourceApiRecord[];
+  chunks: Array<{
+    sourceId: string;
+    text: string;
+    sourceType: "Previous Paper" | "Question Bank" | "Study Material" | "Syllabus Derived";
+    sourceName: string;
+    sourceYear?: string;
+    section: string;
+  }>;
 };
 
 const SUPPORTED_EXTENSIONS = new Set(["pdf", "docx", "ppt", "pptx"]);
@@ -172,17 +204,6 @@ async function uploadCollection(
   return uploaded;
 }
 
-function getModelCacheKey(
-  modelType: ModelType,
-  customConfig: CustomProviderConfig,
-): string {
-  if (modelType === "custom") {
-    return `custom:${customConfig.modelName || "custom-model"}`;
-  }
-
-  return FAST_MODEL;
-}
-
 export function UploadForm() {
   const router = useRouter();
   const { user } = useAuth();
@@ -193,6 +214,7 @@ export function UploadForm() {
   const [previousPaperFiles, setPreviousPaperFiles] = useState<File[]>([]);
   const [hoursLeft, setHoursLeft] = useState<number>(6);
   const [examDate, setExamDate] = useState("");
+  const [youtubeUrlsInput, setYoutubeUrlsInput] = useState("");
 
   const [modelType, setModelType] = useState<ModelType>("gemini");
   const [customConfig, setCustomConfig] = useState<CustomProviderConfig>({
@@ -408,6 +430,62 @@ export function UploadForm() {
         examDate: examDate || null,
       });
 
+      const youtubeUrls = youtubeUrlsInput
+        .split(/\n|,/) 
+        .map((item) => item.trim())
+        .filter((item) => item.startsWith("http"));
+
+      try {
+        const sourceIndexResponse = await fetch("/api/sources/index", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            files: [...uploadedSyllabus, ...uploadedMaterial, ...uploadedPrevious],
+            syllabusTextInput: normalizedSyllabusText,
+            youtubeUrls,
+          }),
+        });
+
+        if (sourceIndexResponse.ok) {
+          const indexedPayload = (await sourceIndexResponse.json()) as SourceIndexResponse;
+
+          for (const source of indexedPayload.sources) {
+            await upsertStudySource(user.uid, strategyId, {
+              id: source.id,
+              type: source.type,
+              title: source.title,
+              status: source.status,
+              enabled: source.enabled,
+              fileUrl: source.fileUrl,
+              youtubeUrl: source.youtubeUrl,
+              websiteUrl: source.websiteUrl,
+              videoId: source.videoId,
+              aiGeneratedTranscript: source.aiGeneratedTranscript,
+              transcriptSource: source.transcriptSource,
+              videoLanguage: source.videoLanguage,
+              translatedToEnglish: source.translatedToEnglish,
+              chunkCount: source.chunkCount,
+              errorMessage: source.errorMessage,
+            });
+          }
+
+          await replaceIndexedChunks(
+            user.uid,
+            strategyId,
+            indexedPayload.chunks.map((chunk) => ({
+              sourceId: chunk.sourceId,
+              text: chunk.text,
+              sourceType: chunk.sourceType,
+              sourceName: chunk.sourceName,
+              sourceYear: chunk.sourceYear,
+              section: chunk.section,
+            })),
+          );
+        }
+      } catch {
+        // best-effort indexing; app can fallback to on-demand parsing
+      }
+
       const fileSignature = `${STUDY_CACHE_SCHEMA_VERSION}:${uploadedSyllabus
         .concat(uploadedMaterial, uploadedPrevious)
         .map((file) => file.url)
@@ -442,6 +520,8 @@ export function UploadForm() {
               studyMode: "precompute",
               examMode: false,
               userIntent: "precompute top-priority topic summary",
+              userId: user.uid,
+              strategyId,
             }),
           });
 
@@ -486,6 +566,8 @@ export function UploadForm() {
                 studyMode: "precompute",
                 examMode: false,
                 userIntent: "precompute learn-now answer",
+                userId: user.uid,
+                strategyId,
               }),
             });
 
@@ -671,6 +753,18 @@ export function UploadForm() {
             onChange={(event) => setExamDate(event.target.value)}
             className="h-11 w-full rounded-2xl border border-white/10 bg-black/30 px-3 text-sm text-white outline-none transition focus:border-white/30"
           />
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-sm text-neutral-300 font-medium">YouTube links (optional)</label>
+          <textarea
+            value={youtubeUrlsInput}
+            onChange={(event) => setYoutubeUrlsInput(event.target.value)}
+            placeholder="Paste one YouTube URL per line"
+            rows={3}
+            className="w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-white outline-none transition focus:border-white/30 placeholder:text-neutral-500"
+          />
+          <p className="text-xs text-neutral-400">Videos with captions will be added as study context automatically.</p>
         </div>
 
         <ModelSwitcher

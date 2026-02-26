@@ -95,7 +95,7 @@ export default function KalExamLanding() {
           className="flex flex-col items-center space-y-16 relative"
         >
           {/* Section ambient glow — right side amber */}
-          <div aria-hidden className="pointer-events-none absolute right-[-15%] top-[20%] w-[520px] h-[420px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(245,158,11,0.11) 0%, transparent 68%)", filter: "blur(90px)" }} />
+          <div aria-hidden className="pointer-events-none hidden md:block absolute right-[-15%] top-[20%] w-[520px] h-[420px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(245,158,11,0.11) 0%, transparent 68%)", filter: "blur(90px)" }} />
 
           <motion.div variants={fadeIn} className="text-center space-y-4">
             <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">How it works</h2>
@@ -110,7 +110,7 @@ export default function KalExamLanding() {
             ].map((step, i) => (
               <motion.div key={i} variants={fadeIn}>
                 {/* Liquid Glass Effect Card */}
-                <Card className="bg-white/5 border border-white/10 backdrop-blur-xl hover:bg-white/10 transition-all duration-300 shadow-2xl rounded-3xl h-full flex flex-col p-2">
+                <Card className="bg-white/5 border border-white/10 backdrop-blur-sm md:backdrop-blur-xl hover:bg-white/10 transition-all duration-300 shadow-lg md:shadow-2xl rounded-3xl h-full flex flex-col p-2">
                   <CardHeader>
                     <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border mb-4 shadow-inner ${step.iconClass}`}>
                       <step.icon className={`w-6 h-6 ${step.textClass}`} />
@@ -135,7 +135,7 @@ export default function KalExamLanding() {
           className="space-y-10 relative"
         >
           {/* Section ambient glow — left side orange */}
-          <div aria-hidden className="pointer-events-none absolute left-[-12%] top-[15%] w-[460px] h-[460px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.10) 0%, transparent 65%)", filter: "blur(100px)" }} />
+          <div aria-hidden className="pointer-events-none hidden md:block absolute left-[-12%] top-[15%] w-[460px] h-[460px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.10) 0%, transparent 65%)", filter: "blur(100px)" }} />
 
           <motion.div variants={fadeIn} className="text-center space-y-3">
             <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">
@@ -178,7 +178,7 @@ export default function KalExamLanding() {
               },
             ].map((feature, index) => (
               <motion.div key={index} variants={fadeIn}>
-                <Card className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl h-full">
+                <Card className="bg-white/5 border border-white/10 backdrop-blur-sm md:backdrop-blur-xl shadow-lg md:shadow-2xl rounded-3xl h-full">
                   <CardHeader>
                     <div className={`w-10 h-10 rounded-xl flex items-center justify-center mb-2 border ${feature.iconClass}`}>
                       <feature.icon className={`w-5 h-5 ${feature.iconTextClass}`} />
@@ -201,9 +201,9 @@ export default function KalExamLanding() {
           className="space-y-16 relative"
         >
           {/* Section ambient glow — bottom right warm */}
-          <div aria-hidden className="pointer-events-none absolute right-[-8%] bottom-[5%] w-[560px] h-[480px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.09) 0%, transparent 62%)", filter: "blur(120px)" }} />
+          <div aria-hidden className="pointer-events-none hidden md:block absolute right-[-8%] bottom-[5%] w-[560px] h-[480px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.09) 0%, transparent 62%)", filter: "blur(120px)" }} />
           {/* Section ambient glow — top left amber */}
-          <div aria-hidden className="pointer-events-none absolute left-[-6%] top-[0%] w-[380px] h-[300px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(245,158,11,0.07) 0%, transparent 70%)", filter: "blur(80px)" }} />
+          <div aria-hidden className="pointer-events-none hidden md:block absolute left-[-6%] top-[0%] w-[380px] h-[300px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(245,158,11,0.07) 0%, transparent 70%)", filter: "blur(80px)" }} />
 
           <div className="text-center space-y-4">
             <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">What you get</h2>
@@ -211,7 +211,7 @@ export default function KalExamLanding() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Card className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl p-6 relative overflow-hidden group">
+            <Card className="bg-white/5 border border-white/10 backdrop-blur-sm md:backdrop-blur-xl shadow-lg md:shadow-2xl rounded-3xl p-6 relative overflow-hidden group">
               <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform duration-500"><Target className="w-32 h-32" /></div>
               <CardHeader className="relative z-10 pb-2">
                 <Badge className="w-fit mb-4 bg-orange-500/15 text-orange-300 hover:bg-orange-500/25 border-none px-3 py-1">High ROI</Badge>
@@ -220,7 +220,7 @@ export default function KalExamLanding() {
               </CardHeader>
             </Card>
 
-            <Card className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl p-6 relative overflow-hidden group">
+            <Card className="bg-white/5 border border-white/10 backdrop-blur-sm md:backdrop-blur-xl shadow-lg md:shadow-2xl rounded-3xl p-6 relative overflow-hidden group">
               <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform duration-500"><BookOpen className="w-32 h-32" /></div>
               <CardHeader className="relative z-10 pb-2">
                 <Badge className="w-fit mb-4 bg-white/10 text-neutral-300 hover:bg-white/15 border-none px-3 py-1">Step-by-step</Badge>
@@ -229,7 +229,7 @@ export default function KalExamLanding() {
               </CardHeader>
             </Card>
 
-            <Card className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl p-6 relative overflow-hidden group">
+            <Card className="bg-white/5 border border-white/10 backdrop-blur-sm md:backdrop-blur-xl shadow-lg md:shadow-2xl rounded-3xl p-6 relative overflow-hidden group">
               <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform duration-500"><XCircle className="w-32 h-32" /></div>
               <CardHeader className="relative z-10 pb-2">
                 <Badge className="w-fit mb-4 bg-red-500/20 text-red-300 hover:bg-red-500/30 border-none px-3 py-1">Time savers</Badge>
@@ -238,7 +238,7 @@ export default function KalExamLanding() {
               </CardHeader>
             </Card>
 
-            <Card className="bg-white/5 border border-white/10 backdrop-blur-xl shadow-2xl rounded-3xl p-6 relative overflow-hidden group">
+            <Card className="bg-white/5 border border-white/10 backdrop-blur-sm md:backdrop-blur-xl shadow-lg md:shadow-2xl rounded-3xl p-6 relative overflow-hidden group">
               <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform duration-500"><FileText className="w-32 h-32" /></div>
               <CardHeader className="relative z-10 pb-2">
                 <Badge className="w-fit mb-4 bg-white/10 text-neutral-300 hover:bg-white/15 border-none px-3 py-1">Ready to go</Badge>
@@ -258,7 +258,7 @@ export default function KalExamLanding() {
           className="py-16 text-center relative"
         >
           {/* Subtle center pulse */}
-          <div aria-hidden className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div aria-hidden className="pointer-events-none hidden md:flex absolute inset-0 items-center justify-center">
             <div className="w-[680px] h-[180px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.07) 0%, transparent 70%)", filter: "blur(70px)" }} />
           </div>
           <div className="max-w-3xl mx-auto space-y-3 relative z-10">
@@ -280,9 +280,9 @@ export default function KalExamLanding() {
           className="relative max-w-4xl mx-auto text-center py-20 px-12 overflow-hidden rounded-[3rem]"
         >
           {/* Liquid glass base for CTA wrapper */}
-          <div className="absolute inset-0 bg-white/5 backdrop-blur-2xl border border-white/10" />
+          <div className="absolute inset-0 bg-white/5 backdrop-blur-sm md:backdrop-blur-2xl border border-white/10" />
           {/* Inner warm CTA glow */}
-          <div aria-hidden className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[300px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.10) 0%, rgba(245,158,11,0.04) 55%, transparent 80%)", filter: "blur(60px)" }} />
+          <div aria-hidden className="pointer-events-none hidden md:block absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[300px] rounded-full" style={{ background: "radial-gradient(ellipse at center, rgba(249,115,22,0.10) 0%, rgba(245,158,11,0.04) 55%, transparent 80%)", filter: "blur(60px)" }} />
           <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-px bg-gradient-to-r from-transparent via-white/30 to-transparent" />
           <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[80%] h-px bg-gradient-to-r from-transparent via-orange-500/40 to-transparent" />
 
@@ -301,7 +301,7 @@ export default function KalExamLanding() {
               asChild
               size="lg"
               variant="outline"
-              className="rounded-full border-white/10 bg-white/5 backdrop-blur-lg hover:bg-white/10 text-white px-8 py-6 text-base font-medium transition-all"
+              className="rounded-full border-white/10 bg-white/5 backdrop-blur-sm md:backdrop-blur-lg hover:bg-white/10 text-white px-8 py-6 text-base font-medium transition-all"
             >
               <a href="#how-it-works">See how it works</a>
             </Button>

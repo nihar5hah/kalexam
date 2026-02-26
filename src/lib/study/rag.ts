@@ -8,13 +8,18 @@ import {
 } from "@/lib/ai/types";
 import {
   AiTaskType,
+  FAST_MODEL,
   RoutingMeta,
   generateWithModelRouter,
+  generateWithModelRouterStream,
 } from "@/lib/ai/modelRouter";
+import { generateWithGeminiModel } from "@/lib/ai/providers/gemini";
+import { getEnabledSourceBundle, getIndexedChunks } from "@/lib/firestore/chunks";
 import { parseUploadedFiles } from "@/lib/parsing";
 import { ParsedSourceChunk } from "@/lib/parsing/types";
 import { computeExamLikelihood, examLikelihoodLabel } from "@/lib/study/exam-likelihood";
 import { FALLBACK_MESSAGE } from "@/lib/study/constants";
+import { StudySourceType } from "@/lib/firestore/sources";
 
 const STOP_WORDS = new Set([
   "the",
@@ -68,6 +73,7 @@ export type TopicStudyContent = {
   sourceRefs: SourceCitation[];
   materialCoverage: number;
   lowMaterialConfidence: boolean;
+  retrievedChunks?: RetrievalDebugChunk[];
   routingMeta?: RoutingMeta;
 };
 
@@ -75,6 +81,8 @@ export type TopicAnswer = {
   answer: string;
   confidence: TopicConfidence;
   citations: SourceCitation[];
+  usedVideoContext?: boolean;
+  retrievedChunks?: RetrievalDebugChunk[];
   routingMeta?: RoutingMeta;
 };
 
@@ -86,6 +94,7 @@ export type LearnItemContent = {
   fullAnswer: string;
   confidence: TopicConfidence;
   citations: SourceCitation[];
+  retrievedChunks?: RetrievalDebugChunk[];
   routingMeta?: RoutingMeta;
 };
 
@@ -101,6 +110,7 @@ export type ExamModeContent = {
   weakAreas: string[];
   examTip: string;
   citations: SourceCitation[];
+  retrievedChunks?: RetrievalDebugChunk[];
   routingMeta?: RoutingMeta;
 };
 
@@ -114,6 +124,7 @@ export type MicroQuizQuestion = {
 export type MicroQuizContent = {
   questions: MicroQuizQuestion[];
   citations: SourceCitation[];
+  retrievedChunks?: RetrievalDebugChunk[];
   routingMeta?: RoutingMeta;
 };
 
@@ -123,7 +134,39 @@ export type StudyGenerationContext = {
   studyMode?: string;
   examMode?: boolean;
   userIntent?: string;
+  userId?: string;
+  strategyId?: string;
+  debugRetrieval?: boolean;
+  expandQuery?: boolean;
 };
+
+type RetrievalSourceKind = StudySourceType | "unknown";
+
+type ContextChunk = {
+  sourceId?: string;
+  chunk: ParsedSourceChunk;
+  sourceKind: RetrievalSourceKind;
+};
+
+type ScoredContextChunk = ContextChunk & {
+  score: number;
+};
+
+export type RetrievalDebugChunk = {
+  sourceName: string;
+  sourceType: RetrievalSourceKind;
+  score: number;
+  selected: boolean;
+};
+
+type RetrievalOptions = {
+  userId?: string;
+  strategyId?: string;
+  debugRetrieval?: boolean;
+  expandQuery?: boolean;
+};
+
+const DOCUMENT_SOURCE_TYPES = new Set<RetrievalSourceKind>(["pdf", "docx", "ppt", "url"]);
 
 function tokenize(text: string): string[] {
   return text
@@ -131,6 +174,176 @@ function tokenize(text: string): string[] {
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
     .filter((word) => word.length > 2 && !STOP_WORDS.has(word));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function toUniqueTokens(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean)));
+}
+
+function isConceptualQuery(query: string): boolean {
+  return /\b(explain|understand|how\s+does|how\s+do|how|why\s+does|why\s+do|why|concept|meaning|intuition)\b/i.test(query);
+}
+
+function inferSourceKind(chunk: ParsedSourceChunk, sourceTypeMap?: Map<string, StudySourceType>, sourceId?: string): RetrievalSourceKind {
+  if (sourceId && sourceTypeMap?.has(sourceId)) {
+    return sourceTypeMap.get(sourceId) ?? "unknown";
+  }
+
+  const section = chunk.section.toLowerCase();
+  const sourceName = chunk.sourceName.toLowerCase();
+  if (section.includes("transcript") || section.includes("reconstructed") || section.includes("ai summary")) {
+    return "youtube";
+  }
+  if (sourceName.endsWith(".pdf")) return "pdf";
+  if (sourceName.endsWith(".doc") || sourceName.endsWith(".docx")) return "docx";
+  if (sourceName.endsWith(".ppt") || sourceName.endsWith(".pptx")) return "ppt";
+  if (sourceName.startsWith("http://") || sourceName.startsWith("https://")) return "url";
+  return "text";
+}
+
+function normalizeSourceName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function toContextLabel(sourceKind: RetrievalSourceKind): string {
+  if (sourceKind === "youtube") {
+    return "VIDEO SOURCE";
+  }
+  if (sourceKind === "url") {
+    return "WEBSITE SOURCE";
+  }
+  if (sourceKind === "pdf" || sourceKind === "docx" || sourceKind === "ppt") {
+    return "DOCUMENT SOURCE";
+  }
+  return "TEXT SOURCE";
+}
+
+function formatContextForPrompt(chunks: ScoredContextChunk[]): string {
+  return chunks
+    .map((item) => {
+      const body = cleanRetrievedText(item.chunk.text) || item.chunk.text;
+      return [`[${toContextLabel(item.sourceKind)}]`, `Title: ${item.chunk.sourceName}`, `Content: ${body}`].join("\n");
+    })
+    .join("\n\n");
+}
+
+function enforceSourceDiversity(candidates: ScoredContextChunk[], maxChunks: number): ScoredContextChunk[] {
+  if (!candidates.length) {
+    return [];
+  }
+
+  const selected: ScoredContextChunk[] = [];
+  const seen = new Set<string>();
+  const keyFor = (item: ScoredContextChunk) => `${item.sourceId ?? "none"}::${item.chunk.section}::${item.chunk.text.slice(0, 80)}`;
+
+  const topVideo = candidates.find((item) => item.sourceKind === "youtube");
+  const topDocument = candidates.find((item) => DOCUMENT_SOURCE_TYPES.has(item.sourceKind));
+  const topNonVideo = candidates.find((item) => item.sourceKind !== "youtube");
+
+  const seed = [topVideo, topDocument ?? topNonVideo].filter((item): item is ScoredContextChunk => Boolean(item));
+  for (const item of seed) {
+    const key = keyFor(item);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    selected.push(item);
+  }
+
+  for (const item of candidates) {
+    if (selected.length >= maxChunks) {
+      break;
+    }
+    const key = keyFor(item);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    selected.push(item);
+  }
+
+  return selected.slice(0, maxChunks);
+}
+
+function ensureEnabledSourceCoverage(
+  selected: ScoredContextChunk[],
+  candidates: ScoredContextChunk[],
+  enabledSourceIds?: Set<string>,
+): ScoredContextChunk[] {
+  if (!enabledSourceIds?.size) {
+    return selected;
+  }
+
+  const next = [...selected];
+  const keyFor = (item: ScoredContextChunk) => `${item.sourceId ?? "none"}::${item.chunk.section}::${item.chunk.text.slice(0, 80)}`;
+  const seen = new Set(next.map(keyFor));
+
+  for (const sourceId of enabledSourceIds) {
+    if (next.some((item) => item.sourceId === sourceId)) {
+      continue;
+    }
+
+    const bestForSource = candidates.find((item) => item.sourceId === sourceId);
+    if (!bestForSource) {
+      continue;
+    }
+
+    const key = keyFor(bestForSource);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    next.push(bestForSource);
+  }
+
+  return next.sort((a, b) => b.score - a.score);
+}
+
+async function expandQueryTokens(query: string, tokens: string[], enabled: boolean): Promise<string[]> {
+  if (!enabled || !tokens.length) {
+    return tokens;
+  }
+
+  try {
+    const prompt = [
+      "Expand this query into related academic keywords and synonyms.",
+      `Query: ${query}`,
+      `Existing tokens: ${tokens.join(", ")}`,
+      "Return only a comma-separated list of 8-14 short keywords.",
+    ].join("\n");
+
+    const raw = await withTimeout(
+      generateWithGeminiModel(prompt, FAST_MODEL),
+      3_000,
+      "query expansion timed out",
+    );
+    const expanded = raw
+      .replace(/[\n;|]/g, ",")
+      .split(",")
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .flatMap((token) => tokenize(token));
+
+    return toUniqueTokens([...tokens, ...expanded]).slice(0, 28);
+  } catch {
+    return tokens;
+  }
 }
 
 function toModelPrompt(
@@ -151,6 +364,30 @@ function toModelPrompt(
     complexityScore,
     qualitySignals,
   });
+}
+
+function toModelPromptStream(
+  taskType: AiTaskType,
+  modelConfig: ModelConfig,
+  prompt: string,
+  onDelta: (chunk: string) => void,
+  qualitySignals?: {
+    retrievalConfidence?: TopicConfidence;
+    minChars?: number;
+    requiresJson?: boolean;
+  },
+  complexityScore?: number,
+) {
+  return generateWithModelRouterStream(
+    {
+      taskType,
+      modelConfig,
+      prompt,
+      complexityScore,
+      qualitySignals,
+    },
+    onDelta,
+  );
 }
 
 function buildContextEnvelope(context?: StudyGenerationContext): string[] {
@@ -270,6 +507,89 @@ function parseJsonObject(raw: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function parseLearnItemContentFromJson(
+  parsed: Record<string, unknown> | null,
+  item: string,
+): {
+  conceptExplanation: string;
+  example: string;
+  examTip: string;
+  typicalExamQuestion: string;
+  fullAnswer: string;
+} {
+  return {
+    conceptExplanation:
+      typeof parsed?.conceptExplanation === "string" && parsed.conceptExplanation.trim()
+        ? parsed.conceptExplanation
+        : "Not found in uploaded material.",
+    example:
+      typeof parsed?.example === "string" && parsed.example.trim()
+        ? parsed.example
+        : "",
+    examTip:
+      typeof parsed?.examTip === "string" && parsed.examTip.trim()
+        ? parsed.examTip
+        : "Focus on scoring patterns and repeated exam wording.",
+    typicalExamQuestion:
+      typeof parsed?.typicalExamQuestion === "string" && parsed.typicalExamQuestion.trim()
+        ? parsed.typicalExamQuestion
+        : `Explain ${item} with exam relevance.`,
+    fullAnswer:
+      typeof parsed?.fullAnswer === "string" && parsed.fullAnswer.trim()
+        ? parsed.fullAnswer
+        : "Not found in uploaded material.",
+  };
+}
+
+function parseLearnItemSections(raw: string, item: string): {
+  conceptExplanation: string;
+  example: string;
+  examTip: string;
+  typicalExamQuestion: string;
+  fullAnswer: string;
+} {
+  const cleaned = raw
+    .replace(/^```[a-zA-Z]*\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  const headings = [
+    "Concept Explanation",
+    "Example",
+    "Exam Tip",
+    "Typical Exam Question",
+    "Full Answer",
+  ] as const;
+
+  const headingPattern = headings.join("|");
+  const sectionMap = new Map<string, string>();
+
+  for (const heading of headings) {
+    const pattern = new RegExp(
+      `(?:^|\\n)\\s*(?:#{1,6}\\s*)?${heading}\\s*:?\\s*([\\s\\S]*?)(?=\\n\\s*(?:#{1,6}\\s*)?(?:${headingPattern})\\s*:?|$)`,
+      "i",
+    );
+    const match = cleaned.match(pattern);
+    if (match?.[1]?.trim()) {
+      sectionMap.set(heading, match[1].trim());
+    }
+  }
+
+  const conceptExplanation = sectionMap.get("Concept Explanation") ?? "Not found in uploaded material.";
+  const example = sectionMap.get("Example") ?? "";
+  const examTip = sectionMap.get("Exam Tip") ?? "Focus on exam language and concise point-wise answers.";
+  const typicalExamQuestion = sectionMap.get("Typical Exam Question") ?? `Explain ${item} with exam relevance.`;
+  const fullAnswer = sectionMap.get("Full Answer") ?? cleaned;
+
+  return {
+    conceptExplanation,
+    example,
+    examTip,
+    typicalExamQuestion,
+    fullAnswer: fullAnswer || "Not found in uploaded material.",
+  };
 }
 
 function toImportanceLevel(sourceType: ParsedSourceChunk["sourceType"]): SourceCitation["importanceLevel"] {
@@ -504,17 +824,155 @@ function normalizeStudyContent(
   };
 }
 
-async function getTopChunks(files: UploadedFile[], query: string, maxChunks = 4) {
-  const parsed = await parseUploadedFiles(files);
-  const tokens = tokenize(query);
-  const scoredCandidates = parsed.sourceChunks
-    .map((chunk) => ({
-      chunk,
-      score: scoreChunk(chunk.text, tokens) + sourcePriorityBoost(chunk.sourceType),
-    }))
+async function getTopChunks(
+  files: UploadedFile[],
+  query: string,
+  maxChunks = 4,
+  options?: RetrievalOptions,
+) {
+  let parsedContextChunks: ContextChunk[] = [];
+  let sourceTypeMap: Map<string, StudySourceType> | undefined;
+  let enabledSourceIds: Set<string> | undefined;
+  let enabledSourceTitleToId: Map<string, string> | undefined;
+
+  if (options?.userId && options.strategyId) {
+    try {
+      const indexedBundle = await getIndexedChunks(options.userId, options.strategyId);
+      sourceTypeMap = indexedBundle.sourceTypeMap;
+      enabledSourceIds = indexedBundle.enabledSourceIds;
+      enabledSourceTitleToId = indexedBundle.enabledSourceTitleToId;
+
+      if (!enabledSourceIds.size) {
+        return {
+          chunks: [],
+          formattedContext: "",
+          citations: [],
+          score: 0,
+          materialCoverage: 0,
+          examLikelihood: {
+            score: 0,
+            label: examLikelihoodLabel(0),
+          },
+          topPreviousPaperChunk: undefined,
+          usedVideoContext: false,
+          retrievedChunks: options?.debugRetrieval
+            ? []
+            : undefined,
+        };
+      }
+
+      if (indexedBundle.chunks.length) {
+        parsedContextChunks = indexedBundle.chunks.map((chunk) => ({
+          sourceId: chunk.sourceId,
+          chunk,
+          sourceKind: inferSourceKind(chunk, indexedBundle.sourceTypeMap, chunk.sourceId),
+        }));
+      }
+    } catch {
+      // fallback to parsing files
+      try {
+        const enabledBundle = await getEnabledSourceBundle(options.userId, options.strategyId);
+        sourceTypeMap = enabledBundle.sourceTypeMap;
+        enabledSourceIds = enabledBundle.enabledSourceIds;
+        enabledSourceTitleToId = enabledBundle.enabledSourceTitleToId;
+      } catch {
+        // no-op
+      }
+    }
+  }
+
+  const parsed = parsedContextChunks.length ? null : await parseUploadedFiles(files);
+  const sourceChunks = parsedContextChunks.length
+    ? parsedContextChunks
+    : (parsed?.sourceChunks ?? [])
+      .map((chunk) => {
+        const mappedSourceId = enabledSourceTitleToId?.get(normalizeSourceName(chunk.sourceName));
+        return {
+          sourceId: mappedSourceId,
+          chunk,
+          sourceKind: inferSourceKind(chunk, sourceTypeMap, mappedSourceId),
+        };
+      })
+      .filter((item) => {
+        if (!enabledSourceIds) {
+          return true;
+        }
+        return Boolean(item.sourceId && enabledSourceIds.has(item.sourceId));
+      });
+
+  const truthFilteredChunks = sourceChunks.filter((item) => {
+    if (!enabledSourceIds) {
+      return true;
+    }
+    return Boolean(item.sourceId && enabledSourceIds.has(item.sourceId));
+  });
+
+  if (!truthFilteredChunks.length) {
+    return {
+      chunks: [],
+      formattedContext: "",
+      citations: [],
+      score: 0,
+      materialCoverage: parsed?.chapters.length
+        ? Math.round(
+            parsed.chapters.reduce((sum, chapter) => sum + chapter.materialCoveragePercent, 0) /
+              parsed.chapters.length,
+          )
+        : 0,
+      examLikelihood: {
+        score: 0,
+        label: examLikelihoodLabel(0),
+      },
+      topPreviousPaperChunk: undefined,
+      usedVideoContext: false,
+      retrievedChunks: options?.debugRetrieval
+        ? []
+        : undefined,
+    };
+  }
+
+  const enabledSourceKinds = enabledSourceIds
+    ? new Set(
+        [...enabledSourceIds]
+          .map((sourceId) => sourceTypeMap?.get(sourceId))
+          .filter((kind): kind is StudySourceType => Boolean(kind)),
+      )
+    : undefined;
+  const isYouTubeOnlyEnabled = Boolean(
+    enabledSourceKinds &&
+      enabledSourceKinds.size === 1 &&
+      enabledSourceKinds.has("youtube"),
+  );
+  const effectiveMaxChunks = Math.max(maxChunks, enabledSourceIds?.size ?? 0);
+
+  const baseTokens = tokenize(query);
+  const tokens = await expandQueryTokens(query, baseTokens, options?.expandQuery !== false);
+  const conceptualQuery = isConceptualQuery(query);
+
+  const scoredCandidates = truthFilteredChunks
+    .map((item) => {
+      let score = scoreChunk(item.chunk.text, tokens) + sourcePriorityBoost(item.chunk.sourceType);
+      if (item.sourceKind === "youtube") {
+        if (score === 0) {
+          score = 3;
+        }
+        score *= 1.15;
+        if (conceptualQuery) {
+          score *= 1.3;
+        }
+        if (isYouTubeOnlyEnabled) {
+          score *= 2.0;
+        }
+      }
+
+      return {
+        ...item,
+        score,
+      };
+    })
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, Math.max(maxChunks * 2, 8));
+    .slice(0, Math.max(effectiveMaxChunks * 3, 12));
 
   const seen = new Set<string>();
   const deduped = scoredCandidates.filter((item) => {
@@ -526,7 +984,7 @@ async function getTopChunks(files: UploadedFile[], query: string, maxChunks = 4)
     return true;
   });
 
-  const overlapBoost = deduped
+  const overlapBoost: ScoredContextChunk[] = deduped
     .map((item) => {
       const overlap = tokens.reduce((count, token) => {
         return item.chunk.text.toLowerCase().includes(token) ? count + 1 : count;
@@ -538,9 +996,34 @@ async function getTopChunks(files: UploadedFile[], query: string, maxChunks = 4)
     })
     .sort((a, b) => b.score - a.score);
 
-  const scored = overlapBoost.slice(0, maxChunks);
+  const selectedByDiversity = enforceSourceDiversity(overlapBoost, effectiveMaxChunks);
+  const selected = ensureEnabledSourceCoverage(selectedByDiversity, overlapBoost, enabledSourceIds).slice(0, effectiveMaxChunks);
 
-  const averageCoverage = parsed.chapters.length
+  const youtubeChunks = truthFilteredChunks.filter((item) => item.sourceKind === "youtube").length;
+  const pdfChunks = truthFilteredChunks.filter((item) => item.sourceKind === "pdf").length;
+  const usedSourceTypes = Array.from(new Set(selected.map((item) => item.sourceKind)));
+  console.log("[RAG] sources used:", {
+    enabledSources: enabledSourceIds ? [...enabledSourceIds] : [],
+    totalChunks: truthFilteredChunks.length,
+    youtubeChunks,
+    pdfChunks,
+    retrievedChunks: overlapBoost.slice(0, Math.max(effectiveMaxChunks * 3, 12)).map((item) => ({
+      sourceId: item.sourceId,
+      sourceName: item.chunk.sourceName,
+      sourceType: item.sourceKind,
+      score: Number(item.score.toFixed(3)),
+    })),
+    selectedChunks: selected.map((item) => ({
+      sourceId: item.sourceId,
+      sourceName: item.chunk.sourceName,
+      sourceType: item.sourceKind,
+      score: Number(item.score.toFixed(3)),
+    })),
+    usedSourceTypes,
+    selectedYoutubeChunks: selected.filter((item) => item.sourceKind === "youtube").length,
+  });
+
+  const averageCoverage = parsed?.chapters.length
     ? Math.round(
         parsed.chapters.reduce((sum, chapter) => sum + chapter.materialCoveragePercent, 0) /
           parsed.chapters.length,
@@ -548,10 +1031,10 @@ async function getTopChunks(files: UploadedFile[], query: string, maxChunks = 4)
     : 0;
 
   const hasQuestionBank = files.some((file) => file.name.toLowerCase().includes("question bank"));
-  const hasPreviousPaper = scored.some((item) => item.chunk.sourceType === "Previous Paper");
-  const repeatedInMaterial = scored.filter((item) => item.chunk.sourceType === "Study Material").length >= 2;
-  const coreTopic = scored.some((item) => item.chunk.sourceType === "Syllabus Derived");
-  const highWeightage = parsed.chapters.some((chapter) => chapter.weightage && parseWeightageScore(chapter.weightage) > 0);
+  const hasPreviousPaper = selected.some((item) => item.chunk.sourceType === "Previous Paper");
+  const repeatedInMaterial = selected.filter((item) => item.chunk.sourceType === "Study Material").length >= 2;
+  const coreTopic = selected.some((item) => item.chunk.sourceType === "Syllabus Derived");
+  const highWeightage = parsed?.chapters.some((chapter) => chapter.weightage && parseWeightageScore(chapter.weightage) > 0) ?? false;
   const likelihood = computeExamLikelihood({
     appearsInPreviousPaper: hasPreviousPaper,
     appearsInQuestionBank: hasQuestionBank,
@@ -560,13 +1043,24 @@ async function getTopChunks(files: UploadedFile[], query: string, maxChunks = 4)
     highChapterWeightage: highWeightage,
   });
 
+  const selectedKeys = new Set(selected.map((item) => `${item.sourceId ?? "none"}::${item.chunk.section}::${item.chunk.text.slice(0, 80)}`));
   return {
-    chunks: scored.map((item) => item.chunk.text),
-    citations: scored.map((item) => toCitation(item.chunk)),
-    score: scored.reduce((sum, item) => sum + item.score, 0),
+    chunks: selected.map((item) => item.chunk.text),
+    formattedContext: formatContextForPrompt(selected),
+    citations: selected.map((item) => toCitation(item.chunk)),
+    score: selected.reduce((sum, item) => sum + item.score, 0),
     materialCoverage: averageCoverage,
     examLikelihood: likelihood,
-    topPreviousPaperChunk: scored.find((item) => item.chunk.sourceType === "Previous Paper")?.chunk,
+    topPreviousPaperChunk: selected.find((item) => item.chunk.sourceType === "Previous Paper")?.chunk,
+    usedVideoContext: selected.some((item) => item.sourceKind === "youtube"),
+    retrievedChunks: options?.debugRetrieval
+      ? overlapBoost.slice(0, Math.max(maxChunks * 3, 12)).map((item) => ({
+        sourceName: item.chunk.sourceName,
+        sourceType: item.sourceKind,
+        score: Number(item.score.toFixed(3)),
+        selected: selectedKeys.has(`${item.sourceId ?? "none"}::${item.chunk.section}::${item.chunk.text.slice(0, 80)}`),
+      }))
+      : undefined,
   };
 }
 
@@ -577,7 +1071,12 @@ export async function buildTopicStudyContent(
   modelConfig: ModelConfig,
   options?: { outlineOnly?: boolean; context?: StudyGenerationContext }
 ): Promise<TopicStudyContent> {
-  const retrieval = await getTopChunks(files, topic, 6);
+  const retrieval = await getTopChunks(files, topic, 6, {
+    userId: options?.context?.userId,
+    strategyId: options?.context?.strategyId,
+    debugRetrieval: options?.context?.debugRetrieval,
+    expandQuery: options?.context?.expandQuery,
+  });
   const confidence = toConfidence(retrieval.score);
   const estimatedTime = estimateTime(priority);
 
@@ -613,11 +1112,12 @@ export async function buildTopicStudyContent(
     };
   }
 
-  const cleanedContext = cleanRetrievedText(retrieval.chunks.join("\n\n"));
+  const cleanedContext = retrieval.formattedContext;
 
   const prompt = [
     "You are a teacher helping a student prepare for exams.",
     "Use only the provided context.",
+    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
     "Do not copy raw text.",
     "Summarize and simplify.",
     "Use short paragraphs.",
@@ -700,6 +1200,7 @@ export async function buildTopicStudyContent(
       },
     ];
     strictNormalized.routingMeta = generated.meta;
+    strictNormalized.retrievedChunks = retrieval.retrievedChunks;
 
     return strictNormalized;
   } catch (error) {
@@ -748,6 +1249,7 @@ export async function buildTopicStudyContent(
         fallbackReason: toFallbackReason(error),
         latencyMs: 0,
       },
+      retrievedChunks: retrieval.retrievedChunks,
     };
   }
 }
@@ -759,7 +1261,12 @@ export async function buildLearnItemContent(
   modelConfig: ModelConfig,
   generationContext?: StudyGenerationContext,
 ): Promise<LearnItemContent> {
-  const retrieval = await getTopChunks(files, `${topic} ${item}`, 5);
+  const retrieval = await getTopChunks(files, `${topic} ${item}`, 5, {
+    userId: generationContext?.userId,
+    strategyId: generationContext?.strategyId,
+    debugRetrieval: generationContext?.debugRetrieval,
+    expandQuery: generationContext?.expandQuery,
+  });
   const confidence = toConfidence(retrieval.score);
 
   if (!retrieval.chunks.length) {
@@ -781,10 +1288,11 @@ export async function buildLearnItemContent(
     };
   }
 
-  const context = cleanRetrievedText(retrieval.chunks.join("\n\n"));
+  const context = retrieval.formattedContext;
   const prompt = [
     "You are an exam-focused tutor.",
     "Use only provided context.",
+    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
     "Return ONLY JSON with keys:",
     '{ "conceptExplanation": string, "example": string, "examTip": string, "typicalExamQuestion": string, "fullAnswer": string }',
     "Keep content medium length and structured with short sections and bullet points.",
@@ -808,29 +1316,16 @@ export async function buildLearnItemContent(
       0.35,
     );
     const parsed = parseJsonObject(generated.text);
+    const normalized = parseLearnItemContentFromJson(parsed, item);
     return {
-      conceptExplanation:
-        typeof parsed?.conceptExplanation === "string" && parsed.conceptExplanation.trim()
-          ? parsed.conceptExplanation
-          : "Not found in uploaded material.",
-      example:
-        typeof parsed?.example === "string" && parsed.example.trim()
-          ? parsed.example
-          : "",
-      examTip:
-        typeof parsed?.examTip === "string" && parsed.examTip.trim()
-          ? parsed.examTip
-          : "Focus on scoring patterns and repeated exam wording.",
-      typicalExamQuestion:
-        typeof parsed?.typicalExamQuestion === "string" && parsed.typicalExamQuestion.trim()
-          ? parsed.typicalExamQuestion
-          : `Explain ${item} with exam relevance.`,
-      fullAnswer:
-        typeof parsed?.fullAnswer === "string" && parsed.fullAnswer.trim()
-          ? parsed.fullAnswer
-          : "Not found in uploaded material.",
+      conceptExplanation: normalized.conceptExplanation,
+      example: normalized.example,
+      examTip: normalized.examTip,
+      typicalExamQuestion: normalized.typicalExamQuestion,
+      fullAnswer: normalized.fullAnswer,
       confidence,
       citations: retrieval.citations,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: generated.meta,
     };
   } catch (error) {
@@ -842,6 +1337,112 @@ export async function buildLearnItemContent(
       fullAnswer: "Not found in uploaded material.",
       confidence,
       citations: retrieval.citations,
+      retrievedChunks: retrieval.retrievedChunks,
+      routingMeta: {
+        taskType: "learn_now_answer",
+        modelUsed: "fallback",
+        fallbackTriggered: true,
+        fallbackReason: toFallbackReason(error),
+        latencyMs: 0,
+      },
+    };
+  }
+}
+
+export async function buildLearnItemContentStream(
+  files: UploadedFile[],
+  topic: string,
+  item: string,
+  modelConfig: ModelConfig,
+  generationContext?: StudyGenerationContext,
+  onDelta?: (chunk: string) => void,
+): Promise<LearnItemContent> {
+  const retrieval = await getTopChunks(files, `${topic} ${item}`, 5, {
+    userId: generationContext?.userId,
+    strategyId: generationContext?.strategyId,
+    debugRetrieval: generationContext?.debugRetrieval,
+    expandQuery: generationContext?.expandQuery,
+  });
+  const confidence = toConfidence(retrieval.score);
+
+  if (!retrieval.chunks.length) {
+    return {
+      conceptExplanation: "Not found in uploaded material.",
+      example: "",
+      examTip: "Upload more topic-relevant material.",
+      typicalExamQuestion: `Explain ${item}.`,
+      fullAnswer: "Not found in uploaded material.",
+      confidence: "low",
+      citations: [],
+      routingMeta: {
+        taskType: "learn_now_answer",
+        modelUsed: "cache-none",
+        fallbackTriggered: true,
+        fallbackReason: "no_retrieval_chunks",
+        latencyMs: 0,
+      },
+    };
+  }
+
+  const context = retrieval.formattedContext;
+  const prompt = [
+    "You are an exam-focused tutor.",
+    "Use only provided context.",
+    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
+    "Return plain markdown with exactly these sections in order:",
+    "Concept Explanation:",
+    "Example:",
+    "Exam Tip:",
+    "Typical Exam Question:",
+    "Full Answer:",
+    "Keep content medium length and structured with concise bullet points where useful.",
+    `Topic: ${topic}`,
+    `Learning item: ${item}`,
+    ...buildContextEnvelope(generationContext),
+    "Context:",
+    context,
+  ].join("\n");
+
+  try {
+    const generated = await toModelPromptStream(
+      "learn_now_answer",
+      modelConfig,
+      prompt,
+      (chunk) => {
+        if (!chunk) {
+          return;
+        }
+        onDelta?.(chunk);
+      },
+      {
+        minChars: 180,
+        retrievalConfidence: confidence,
+      },
+      0.35,
+    );
+
+    const parsed = parseLearnItemSections(generated.text, item);
+    return {
+      conceptExplanation: parsed.conceptExplanation,
+      example: parsed.example,
+      examTip: parsed.examTip,
+      typicalExamQuestion: parsed.typicalExamQuestion,
+      fullAnswer: parsed.fullAnswer,
+      confidence,
+      citations: retrieval.citations,
+      retrievedChunks: retrieval.retrievedChunks,
+      routingMeta: generated.meta,
+    };
+  } catch (error) {
+    return {
+      conceptExplanation: "Not found in uploaded material.",
+      example: "",
+      examTip: "Focus on exam language and concise point-wise answers.",
+      typicalExamQuestion: `Explain ${item} with a suitable example.`,
+      fullAnswer: "Not found in uploaded material.",
+      confidence,
+      citations: retrieval.citations,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: {
         taskType: "learn_now_answer",
         modelUsed: "fallback",
@@ -861,14 +1462,26 @@ export async function answerTopicQuestion(
   history: Array<{ role: "user" | "assistant"; content: string }> = [],
   generationContext?: StudyGenerationContext,
 ): Promise<TopicAnswer> {
-  const retrieval = await getTopChunks(files, `${topic} ${question}`, 5);
+  const retrieval = await getTopChunks(files, `${topic} ${question}`, 5, {
+    userId: generationContext?.userId,
+    strategyId: generationContext?.strategyId,
+    debugRetrieval: generationContext?.debugRetrieval,
+    expandQuery: generationContext?.expandQuery,
+  });
   const confidence = toConfidence(retrieval.score);
 
   if (!retrieval.chunks.length) {
     return {
-      answer: FALLBACK_MESSAGE,
+      answer: [
+        "Not directly found in your material, but here is a helpful explanation based on related concepts.",
+        "",
+        `For **${topic}**, think of this question as: ${question}.`,
+        "Start by defining the core idea in one line, then explain how it works in simple steps, and finally connect it to a likely exam-style use case.",
+      ].join("\n"),
       confidence: "low",
       citations: [],
+      usedVideoContext: false,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: {
         taskType: "chat_follow_up",
         modelUsed: "cache-none",
@@ -879,11 +1492,12 @@ export async function answerTopicQuestion(
     };
   }
 
-  const cleanedContext = cleanRetrievedText(retrieval.chunks.join("\n\n"));
+  const cleanedContext = retrieval.formattedContext;
   const recentTurns = history.slice(-6).map((turn) => `${turn.role}: ${turn.content}`).join("\n");
 
   const prompt = [
     "You are an exam tutor.",
+    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
     "Answer the question using this priority:",
     "1) Use uploaded material first.",
     "2) If not directly found, provide a short relevant educational explanation.",
@@ -936,14 +1550,22 @@ export async function answerTopicQuestion(
           answer: normalized,
           confidence: confidence === "high" ? "medium" : "low",
           citations: retrieval.citations,
+          usedVideoContext: retrieval.usedVideoContext,
+          retrievedChunks: retrieval.retrievedChunks,
           routingMeta: response.meta,
         };
       }
 
+      const normalized = answerText.startsWith("Not directly found in your material")
+        ? answerText
+        : `Not directly found in your material, but here is a helpful explanation based on related concepts.\n\n${answerText}`;
+
       return {
-        answer: "Not found in uploaded material.",
+        answer: normalized,
         confidence: "low",
         citations: retrieval.citations,
+        usedVideoContext: retrieval.usedVideoContext,
+        retrievedChunks: retrieval.retrievedChunks,
         routingMeta: response.meta,
       };
     }
@@ -952,14 +1574,171 @@ export async function answerTopicQuestion(
       answer: answerText,
       confidence,
       citations: retrieval.citations,
+      usedVideoContext: retrieval.usedVideoContext,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: response.meta,
     };
   } catch (error) {
-    const fallbackAnswer = "Not found in uploaded material.";
+    const fallbackAnswer =
+      "Not directly found in your material, but here is a helpful explanation based on related concepts.\n\nFocus on the core definition, process, and one exam-ready example.";
     return {
       answer: fallbackAnswer || FALLBACK_MESSAGE,
       confidence: "low",
       citations: retrieval.citations,
+      usedVideoContext: retrieval.usedVideoContext,
+      retrievedChunks: retrieval.retrievedChunks,
+      routingMeta: {
+        taskType: "chat_follow_up",
+        modelUsed: "fallback",
+        fallbackTriggered: true,
+        fallbackReason: toFallbackReason(error),
+        latencyMs: 0,
+      },
+    };
+  }
+}
+
+export async function answerTopicQuestionStream(
+  files: UploadedFile[],
+  topic: string,
+  question: string,
+  modelConfig: ModelConfig,
+  history: Array<{ role: "user" | "assistant"; content: string }> = [],
+  generationContext?: StudyGenerationContext,
+  onDelta?: (chunk: string) => void,
+): Promise<TopicAnswer> {
+  const retrieval = await getTopChunks(files, `${topic} ${question}`, 5, {
+    userId: generationContext?.userId,
+    strategyId: generationContext?.strategyId,
+    debugRetrieval: generationContext?.debugRetrieval,
+    expandQuery: generationContext?.expandQuery,
+  });
+  const confidence = toConfidence(retrieval.score);
+
+  if (!retrieval.chunks.length) {
+    return {
+      answer: [
+        "Not directly found in your material, but here is a helpful explanation based on related concepts.",
+        "",
+        `For **${topic}**, think of this question as: ${question}.`,
+        "Start by defining the core idea in one line, then explain how it works in simple steps, and finally connect it to a likely exam-style use case.",
+      ].join("\n"),
+      confidence: "low",
+      citations: [],
+      usedVideoContext: false,
+      retrievedChunks: retrieval.retrievedChunks,
+      routingMeta: {
+        taskType: "chat_follow_up",
+        modelUsed: "cache-none",
+        fallbackTriggered: true,
+        fallbackReason: "no_retrieval_chunks",
+        latencyMs: 0,
+      },
+    };
+  }
+
+  const cleanedContext = retrieval.formattedContext;
+  const recentTurns = history.slice(-6).map((turn) => `${turn.role}: ${turn.content}`).join("\n");
+
+  const prompt = [
+    "You are an exam tutor.",
+    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
+    "Answer the question using this priority:",
+    "1) Use uploaded material first.",
+    "2) If not directly found, provide a short relevant educational explanation.",
+    '3) If using broader explanation, start with exactly: "Not directly found in your material, but relevant:"',
+    "Never invent exam facts that are not supported by context.",
+    "Keep answer concise: 4 to 7 sentences maximum.",
+    `Topic: ${topic}`,
+    `Question: ${question}`,
+    ...buildContextEnvelope(generationContext),
+    "Recent chat context:",
+    recentTurns || "None",
+    "Retrieved context:",
+    cleanedContext,
+  ].join("\n");
+
+  try {
+    const response = await toModelPromptStream(
+      "chat_follow_up",
+      modelConfig,
+      prompt,
+      (chunk) => {
+        if (!chunk) {
+          return;
+        }
+        onDelta?.(chunk);
+      },
+      {
+        minChars: 90,
+        retrievalConfidence: confidence,
+      },
+      0.3,
+    );
+
+    const answerText = response.text
+      .replace(/^```[\s\S]*?\n/, "")
+      .replace(/```$/, "")
+      .trim();
+
+    if (!answerText) {
+      return {
+        answer: FALLBACK_MESSAGE,
+        confidence: "low",
+        citations: [],
+        routingMeta: response.meta,
+      };
+    }
+
+    const queryTokens = tokenize(`${topic} ${question}`);
+    const isGrounded = hasTokenMatch(answerText, queryTokens);
+    if (!isGrounded) {
+      if (retrieval.score >= 5) {
+        const normalized = answerText.startsWith("Not directly found in your material, but relevant:")
+          ? answerText
+          : `Not directly found in your material, but relevant:\n\n${answerText}`;
+
+        return {
+          answer: normalized,
+          confidence: confidence === "high" ? "medium" : "low",
+          citations: retrieval.citations,
+          usedVideoContext: retrieval.usedVideoContext,
+          retrievedChunks: retrieval.retrievedChunks,
+          routingMeta: response.meta,
+        };
+      }
+
+      const normalized = answerText.startsWith("Not directly found in your material")
+        ? answerText
+        : `Not directly found in your material, but here is a helpful explanation based on related concepts.\n\n${answerText}`;
+
+      return {
+        answer: normalized,
+        confidence: "low",
+        citations: retrieval.citations,
+        usedVideoContext: retrieval.usedVideoContext,
+        retrievedChunks: retrieval.retrievedChunks,
+        routingMeta: response.meta,
+      };
+    }
+
+    return {
+      answer: answerText,
+      confidence,
+      citations: retrieval.citations,
+      usedVideoContext: retrieval.usedVideoContext,
+      retrievedChunks: retrieval.retrievedChunks,
+      routingMeta: response.meta,
+    };
+  } catch (error) {
+    const fallbackAnswer =
+      "Not directly found in your material, but here is a helpful explanation based on related concepts.\n\nFocus on the core definition, process, and one exam-ready example.";
+    return {
+      answer: fallbackAnswer || FALLBACK_MESSAGE,
+      confidence: "low",
+      citations: retrieval.citations,
+      usedVideoContext: retrieval.usedVideoContext,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: {
         taskType: "chat_follow_up",
         modelUsed: "fallback",
@@ -977,7 +1756,12 @@ export async function buildExamModeContent(
   modelConfig: ModelConfig,
   generationContext?: StudyGenerationContext,
 ): Promise<ExamModeContent> {
-  const retrieval = await getTopChunks(files, `${topic} likely exam questions`, 6);
+  const retrieval = await getTopChunks(files, `${topic} likely exam questions`, 6, {
+    userId: generationContext?.userId,
+    strategyId: generationContext?.strategyId,
+    debugRetrieval: generationContext?.debugRetrieval,
+    expandQuery: generationContext?.expandQuery,
+  });
   const confidence = toConfidence(retrieval.score);
 
   if (!retrieval.chunks.length) {
@@ -1005,10 +1789,11 @@ export async function buildExamModeContent(
     };
   }
 
-  const context = cleanRetrievedText(retrieval.chunks.join("\n\n"));
+  const context = retrieval.formattedContext;
   const prompt = [
     "You are an exam coach.",
     "Use only the provided context.",
+    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
     "Return ONLY valid JSON with exact shape:",
     '{ "likelyQuestions": [{"question": string, "expectedAnswer": string, "difficulty": "easy"|"medium"|"hard", "timeLimitMinutes": number}], "readinessScore": number, "weakAreas": string[], "examTip": string }',
     "Generate 3 likely exam questions and concise expected answers.",
@@ -1089,6 +1874,7 @@ export async function buildExamModeContent(
           ? parsed.examTip
           : "Practice high-likelihood questions first and focus on concise structured answers.",
       citations: retrieval.citations,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: generated.meta,
     };
   } catch (error) {
@@ -1106,6 +1892,7 @@ export async function buildExamModeContent(
       weakAreas: ["Unable to infer all weak areas from available context."],
       examTip: "Revise definitions, solve one timed answer, then re-attempt exam mode.",
       citations: retrieval.citations,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: {
         taskType: "exam_mode_generation",
         modelUsed: "fallback",
@@ -1124,7 +1911,12 @@ export async function buildMicroQuizContent(
   count = 4,
   generationContext?: StudyGenerationContext,
 ): Promise<MicroQuizContent> {
-  const retrieval = await getTopChunks(files, `${topic} quiz questions`, 8);
+  const retrieval = await getTopChunks(files, `${topic} quiz questions`, 8, {
+    userId: generationContext?.userId,
+    strategyId: generationContext?.strategyId,
+    debugRetrieval: generationContext?.debugRetrieval,
+    expandQuery: generationContext?.expandQuery,
+  });
   if (!retrieval.chunks.length) {
     return {
       questions: [],
@@ -1139,10 +1931,11 @@ export async function buildMicroQuizContent(
     };
   }
 
-  const context = cleanRetrievedText(retrieval.chunks.join("\n\n"));
+  const context = retrieval.formattedContext;
   const prompt = [
     "You are generating a micro quiz from uploaded material.",
     "Use strictly and only the provided context.",
+    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
     "If evidence is weak, avoid inventing facts.",
     "Return only valid JSON with shape:",
     '{ "questions": [{ "question": string, "answer": string, "explanation": string, "difficulty": "easy"|"medium"|"hard" }] }',
@@ -1189,12 +1982,14 @@ export async function buildMicroQuizContent(
     return {
       questions,
       citations: retrieval.citations,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: generated.meta,
     };
   } catch (error) {
     return {
       questions: [],
       citations: retrieval.citations,
+      retrievedChunks: retrieval.retrievedChunks,
       routingMeta: {
         taskType: "quiz_generation",
         modelUsed: "fallback",

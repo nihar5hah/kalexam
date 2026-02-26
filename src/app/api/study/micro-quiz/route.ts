@@ -21,10 +21,13 @@ type MicroQuizRequest = {
   studyMode?: string;
   examMode?: boolean;
   userIntent?: string;
+  userId?: string;
+  strategyId?: string;
 };
 
 export async function POST(request: Request) {
   try {
+    const debugRetrieval = new URL(request.url).searchParams.get("debugRetrieval") === "true";
     const body = (await request.json()) as MicroQuizRequest;
     if (!body.topic?.trim()) {
       return NextResponse.json({ error: "Missing topic" }, { status: 400 });
@@ -43,6 +46,9 @@ export async function POST(request: Request) {
       studyMode: body.studyMode,
       examMode: body.examMode,
       userIntent: body.userIntent,
+      userId: body.userId,
+      strategyId: body.strategyId,
+      debugRetrieval,
     });
     return NextResponse.json(quiz);
   } catch {

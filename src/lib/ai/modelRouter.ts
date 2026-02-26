@@ -1,6 +1,8 @@
 import { ModelConfig } from "@/lib/ai/types";
 import { generateWithCustomProvider } from "@/lib/ai/providers/custom";
+import { generateWithCustomProviderStream } from "@/lib/ai/providers/custom";
 import { generateWithGeminiModel } from "@/lib/ai/providers/gemini";
+import { generateWithGeminiModelStream } from "@/lib/ai/providers/gemini";
 
 export const SMART_MODEL = "gemini-3.1-pro-preview";
 export const FAST_MODEL = "gemini-3-flash-preview";
@@ -53,6 +55,8 @@ type RoutedGenerationInput = {
   complexityScore?: number;
   qualitySignals?: QualitySignals;
 };
+
+type DeltaHandler = (chunk: string) => void;
 
 type ProviderErrorCode =
   | "missing_api_key"
@@ -170,6 +174,25 @@ async function runWithModel(prompt: string, modelConfig: ModelConfig, modelName:
   }
 }
 
+async function runWithModelStream(
+  prompt: string,
+  modelConfig: ModelConfig,
+  modelName: string,
+  onDelta: DeltaHandler,
+): Promise<string> {
+  try {
+    if (modelConfig.modelType === "custom") {
+      return generateWithCustomProviderStream(prompt, modelConfig.config, onDelta);
+    }
+
+    return generateWithGeminiModelStream(prompt, modelName, onDelta);
+  } catch (error) {
+    const code = classifyProviderError(error);
+    const message = error instanceof Error ? error.message : "Unknown provider error";
+    throw new ModelRouterGenerationError(code, message);
+  }
+}
+
 export async function generateWithModelRouter(
   input: RoutedGenerationInput,
 ): Promise<{ text: string; meta: RoutingMeta }> {
@@ -256,6 +279,61 @@ export async function generateWithModelRouter(
       latencyMs: Date.now() - startedAt,
     },
   };
+}
+
+export async function generateWithModelRouterStream(
+  input: RoutedGenerationInput,
+  onDelta: DeltaHandler,
+): Promise<{ text: string; meta: RoutingMeta }> {
+  const startedAt = Date.now();
+
+  if (input.modelConfig.modelType === "custom") {
+    const text = await runWithModelStream(input.prompt, input.modelConfig, input.modelConfig.config.modelName, onDelta);
+    return {
+      text,
+      meta: {
+        taskType: input.taskType,
+        modelUsed: input.modelConfig.config.modelName,
+        fallbackTriggered: false,
+        latencyMs: Date.now() - startedAt,
+      },
+    };
+  }
+
+  const primaryModel = routeModel(input.taskType, input.complexityScore);
+
+  try {
+    const text = await runWithModelStream(input.prompt, input.modelConfig, primaryModel, onDelta);
+    return {
+      text,
+      meta: {
+        taskType: input.taskType,
+        modelUsed: primaryModel,
+        fallbackTriggered: false,
+        latencyMs: Date.now() - startedAt,
+      },
+    };
+  } catch (error) {
+    const primaryErrorCode = classifyProviderError(error);
+    if (primaryModel === SMART_MODEL) {
+      throw new ModelRouterGenerationError(
+        primaryErrorCode ?? "unknown_provider_error",
+        `smart_model_failed:${primaryErrorCode ?? "unknown_provider_error"}`,
+      );
+    }
+
+    const upgraded = await runWithModelStream(input.prompt, input.modelConfig, SMART_MODEL, onDelta);
+    return {
+      text: upgraded,
+      meta: {
+        taskType: input.taskType,
+        modelUsed: SMART_MODEL,
+        fallbackTriggered: true,
+        fallbackReason: `primary_model_error:${primaryErrorCode ?? "unknown_provider_error"}`,
+        latencyMs: Date.now() - startedAt,
+      },
+    };
+  }
 }
 
 export function resolveModelConfig(selection: RouteModelSelectionInput): ModelConfig {

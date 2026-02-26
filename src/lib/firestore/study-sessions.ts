@@ -65,6 +65,7 @@ export type StudySession = {
       model: string;
       answer: string;
       confidence: "high" | "medium" | "low";
+      usedVideoContext?: boolean;
       citations: Array<{
         sourceType: string;
         sourceName: string;
@@ -140,6 +141,7 @@ export type StudySession = {
       cacheHit: boolean;
       fallbackTriggered: boolean;
       fallbackReason?: string;
+      usedVideoContext?: boolean;
     }>;
     summary?: {
       totalCalls: number;
@@ -157,6 +159,7 @@ export type AiTelemetryEvent = {
   cacheHit: boolean;
   fallbackTriggered: boolean;
   fallbackReason?: string;
+  usedVideoContext?: boolean;
 };
 
 type CreateStudySessionInput = {
@@ -645,6 +648,7 @@ export async function getChatCacheFromSession(
   return {
     answer: entry.answer,
     confidence: entry.confidence,
+    usedVideoContext: entry.usedVideoContext,
     citations: entry.citations,
     model: entry.model,
   };
@@ -660,6 +664,7 @@ export async function saveChatCacheToSession(
     model: string;
     answer: string;
     confidence: "high" | "medium" | "low";
+    usedVideoContext?: boolean;
     citations: Array<{
       sourceType: string;
       sourceName: string;
@@ -683,6 +688,7 @@ export async function saveChatCacheToSession(
       model: payload.model,
       answer: payload.answer,
       confidence: payload.confidence,
+      usedVideoContext: payload.usedVideoContext ?? false,
       citations: payload.citations,
     }),
     updatedAt: serverTimestamp(),
@@ -796,6 +802,7 @@ export async function recordAiTelemetryInSession(
       cacheHit: Boolean(event.cacheHit),
       fallbackTriggered: Boolean(event.fallbackTriggered),
       fallbackReason: event.fallbackReason,
+      usedVideoContext: event.usedVideoContext,
     },
   ].slice(-150);
 

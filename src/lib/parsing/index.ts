@@ -36,7 +36,7 @@ async function parseFileFromUrl(file: UploadedFile): Promise<{ text: string; war
 
   const response = await fetch(file.url);
   if (!response.ok) {
-    return { text: "", warning: `${file.name}: failed to fetch file` };
+    return { text: "", warning: `${file.name}: failed to fetch file (HTTP ${response.status})` };
   }
 
   const arrayBuffer = await response.arrayBuffer();
@@ -58,8 +58,9 @@ async function parseFileFromUrl(file: UploadedFile): Promise<{ text: string; war
       text: pptText,
       warning: `${file.name}: legacy .ppt parsed with best-effort mode; convert to .pptx for better quality.`,
     };
-  } catch {
-    return { text: "", warning: `${file.name}: parser could not extract readable text` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown parser error";
+    return { text: "", warning: `${file.name}: parser could not extract readable text (${message})` };
   }
 }
 
@@ -104,10 +105,6 @@ function toSourceType(file: UploadedFile): ParsedSourceChunk["sourceType"] {
 
 function toSourceChunks(parsedItems: Array<{ file: UploadedFile; text: string }>): ParsedSourceChunk[] {
   return parsedItems.flatMap(({ file, text }) => {
-    if (extensionFromFile(file) === "ppt") {
-      return [];
-    }
-
     const sanitized = sanitizeExtractedText(text);
     const pieces = splitSourceText(sanitized);
     const sourceType = toSourceType(file);

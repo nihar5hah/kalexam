@@ -129,6 +129,22 @@ html {
   }
 }
 
+/* Safe area utilities for notch / home indicator */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.mb-safe {
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+.bottom-safe {
+  bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Prevent rubber-band overscroll flash on iOS */
+body {
+  overscroll-behavior: none;
+}
+
 @keyframes shimmer {
   100% {
     transform: translateX(200%);

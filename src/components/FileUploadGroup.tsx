@@ -22,6 +22,8 @@ export function FileUploadGroup({
   onFilesAdd,
   onFileRemove,
 }: FileUploadGroupProps) {
+  const inputId = `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-input`;
+
   return (
     <div className="space-y-3">
       <div className="space-y-1">
@@ -32,6 +34,7 @@ export function FileUploadGroup({
       </div>
 
       <input
+        id={inputId}
         type="file"
         multiple
         accept=".pdf,.docx,.ppt,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -42,8 +45,15 @@ export function FileUploadGroup({
           }
           event.currentTarget.value = "";
         }}
-        className="w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-neutral-300 file:mr-3 file:rounded-xl file:border-0 file:bg-white/10 file:px-3 file:py-1 file:text-xs file:text-white"
+        className="sr-only"
       />
+
+      <label
+        htmlFor={inputId}
+        className="flex w-full cursor-pointer items-center justify-center rounded-2xl border border-dashed border-white/20 bg-black/30 px-4 py-5 text-sm text-neutral-200 transition hover:border-white/40 hover:bg-black/40"
+      >
+        Tap to select files
+      </label>
 
       <AnimatePresence initial={false}>
         {files.length ? (

@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 
 import { useAuth } from "@/components/AuthProvider";
+import { TextShimmerWave } from "@/components/ui/text-shimmer-wave";
 
 export function RequireAuth({
   children,
@@ -24,7 +25,9 @@ export function RequireAuth({
   if (loading || !user) {
     return (
       <div className="min-h-screen bg-[#050505] text-white flex items-center justify-center">
-        <p className="text-neutral-400">Checking your session...</p>
+        <TextShimmerWave className="text-sm [--base-color:#a3a3a3] [--base-gradient-color:#ffffff]" duration={1}>
+          Checking your session...
+        </TextShimmerWave>
       </div>
     );
   }

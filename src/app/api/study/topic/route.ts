@@ -22,10 +22,13 @@ type TopicStudyRequest = {
   studyMode?: string;
   examMode?: boolean;
   userIntent?: string;
+  userId?: string;
+  strategyId?: string;
 };
 
 export async function POST(request: Request) {
   try {
+    const debugRetrieval = new URL(request.url).searchParams.get("debugRetrieval") === "true";
     const body = (await request.json()) as TopicStudyRequest;
 
     if (!body.topic?.trim()) {
@@ -47,6 +50,9 @@ export async function POST(request: Request) {
         studyMode: body.studyMode,
         examMode: body.examMode,
         userIntent: body.userIntent,
+        userId: body.userId,
+        strategyId: body.strategyId,
+        debugRetrieval,
       },
     });
 

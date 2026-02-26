@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { UploadedFile } from "@/lib/ai/types";
 import { resolveModelConfig } from "@/lib/ai/modelRouter";
 import { answerTopicQuestion } from "@/lib/study/rag";
+import { answerTopicQuestionStream } from "@/lib/study/rag";
 
 export const runtime = "nodejs";
 
@@ -22,10 +23,33 @@ type TopicQuestionRequest = {
   studyMode?: string;
   examMode?: boolean;
   userIntent?: string;
+  stream?: boolean;
+  userId?: string;
+  strategyId?: string;
 };
+
+function createSseResponse(stream: ReadableStream<Uint8Array>): Response {
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
+
+function enqueueSseEvent(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  payload: Record<string, unknown>,
+) {
+  controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+}
 
 export async function POST(request: Request) {
   try {
+    const debugRetrieval = new URL(request.url).searchParams.get("debugRetrieval") === "true";
     const body = (await request.json()) as TopicQuestionRequest;
 
     if (!body.topic?.trim()) {
@@ -42,14 +66,65 @@ export async function POST(request: Request) {
     }
 
     const modelConfig = resolveModelConfig(body);
-    const answer = await answerTopicQuestion(files, body.topic, body.question, modelConfig, body.history ?? [], {
-      currentChapter: body.currentChapter,
-      examTimeRemaining: body.examTimeRemaining,
-      studyMode: body.studyMode,
-      examMode: body.examMode,
-      userIntent: body.userIntent,
+    if (!body.stream) {
+      const answer = await answerTopicQuestion(files, body.topic, body.question, modelConfig, body.history ?? [], {
+        currentChapter: body.currentChapter,
+        examTimeRemaining: body.examTimeRemaining,
+        studyMode: body.studyMode,
+        examMode: body.examMode,
+        userIntent: body.userIntent,
+        userId: body.userId,
+        strategyId: body.strategyId,
+        debugRetrieval,
+      });
+
+      return NextResponse.json(answer);
+    }
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const encoder = new TextEncoder();
+
+        try {
+          enqueueSseEvent(controller, encoder, { type: "started" });
+
+          const answer = await answerTopicQuestionStream(
+            files,
+            body.topic!,
+            body.question!,
+            modelConfig,
+            body.history ?? [],
+            {
+              currentChapter: body.currentChapter,
+              examTimeRemaining: body.examTimeRemaining,
+              studyMode: body.studyMode,
+              examMode: body.examMode,
+              userIntent: body.userIntent,
+              userId: body.userId,
+              strategyId: body.strategyId,
+              debugRetrieval,
+            },
+            (chunk) => {
+              enqueueSseEvent(controller, encoder, { type: "delta", chunk });
+            },
+          );
+
+          enqueueSseEvent(controller, encoder, {
+            type: "done",
+            payload: answer,
+          });
+        } catch {
+          enqueueSseEvent(controller, encoder, {
+            type: "error",
+            message: "Unable to generate response right now.",
+          });
+        } finally {
+          controller.close();
+        }
+      },
     });
-    return NextResponse.json(answer);
+
+    return createSseResponse(stream);
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
