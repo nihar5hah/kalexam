@@ -14,7 +14,7 @@ import {
   generateWithModelRouterStream,
 } from "@/lib/ai/modelRouter";
 import { generateWithGeminiModel } from "@/lib/ai/providers/gemini";
-import { getEnabledSourceBundle, getIndexedChunks } from "@/lib/firestore/chunks";
+import { getIndexedChunksAdmin, getEnabledSourceBundleAdmin } from "@/lib/firestore/chunks-admin";
 import { parseUploadedFiles } from "@/lib/parsing";
 import { ParsedSourceChunk } from "@/lib/parsing/types";
 import { computeExamLikelihood, examLikelihoodLabel } from "@/lib/study/exam-likelihood";
@@ -837,7 +837,7 @@ async function getTopChunks(
 
   if (options?.userId && options.strategyId) {
     try {
-      const indexedBundle = await getIndexedChunks(options.userId, options.strategyId);
+      const indexedBundle = await getIndexedChunksAdmin(options.userId, options.strategyId);
       sourceTypeMap = indexedBundle.sourceTypeMap;
       enabledSourceIds = indexedBundle.enabledSourceIds;
       enabledSourceTitleToId = indexedBundle.enabledSourceTitleToId;
@@ -871,7 +871,7 @@ async function getTopChunks(
     } catch {
       // fallback to parsing files
       try {
-        const enabledBundle = await getEnabledSourceBundle(options.userId, options.strategyId);
+        const enabledBundle = await getEnabledSourceBundleAdmin(options.userId, options.strategyId);
         sourceTypeMap = enabledBundle.sourceTypeMap;
         enabledSourceIds = enabledBundle.enabledSourceIds;
         enabledSourceTitleToId = enabledBundle.enabledSourceTitleToId;

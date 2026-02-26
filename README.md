@@ -95,6 +95,12 @@ NEXT_PUBLIC_FIREBASE_API_KEY=...
 NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=...
 NEXT_PUBLIC_FIREBASE_PROJECT_ID=...
 # Additional Firebase config
+
+# Server-side Admin SDK (needed for RAG / indexed-chunk reads)
+FIREBASE_SERVICE_ACCOUNT_KEY={...}  # Full JSON service-account key, OR:
+FIREBASE_CLIENT_EMAIL=...           # service-account email
+FIREBASE_PRIVATE_KEY=...            # PEM private key (newlines as \n)
+FIREBASE_PROJECT_ID=...             # can also fall back to NEXT_PUBLIC_FIREBASE_PROJECT_ID
 ```
 
 **Backend** (`.env.local`):
