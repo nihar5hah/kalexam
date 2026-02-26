@@ -561,6 +561,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   const [contextFiles, setContextFiles] = useState<UploadedFile[]>([]);
   const topicOpenedAtRef = useRef<number | null>(null);
   const [sessionExamDate, setSessionExamDate] = useState<string | null>(null);
+  const [topicCompletionMap, setTopicCompletionMap] = useState<Record<string, boolean>>({});
 
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [asking, setAsking] = useState(false);
@@ -649,10 +650,21 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       setCompleted(Boolean(stored.studyProgress?.[topicSlug]?.completed));
       setRecoveryMessage(null);
 
+      const initialTopicCompletion = normalized.topics.reduce<Record<string, boolean>>((accumulator, item) => {
+        accumulator[item.slug] = Boolean(stored.studyProgress?.[item.slug]?.completed);
+        return accumulator;
+      }, {});
+
       const session = await getStudySessionByStrategyId(user.uid, strategyId);
       if (session) {
         setSessionExamDate(session.data.examDate ?? null);
+
+        for (const [slug, progress] of Object.entries(session.data.topicProgress ?? {})) {
+          initialTopicCompletion[slug] = progress?.status === "completed";
+        }
       }
+
+      setTopicCompletionMap(initialTopicCompletion);
 
       const allFiles = [
         ...stored.syllabusFiles,
@@ -1016,18 +1028,62 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       return;
     }
 
+    let removedItem: (typeof sources)[number] | undefined;
     setSources((prev) => {
-      const previous = prev;
-      void (async () => {
-        try {
-          await removeStudySource(user.uid, strategyId, sourceId);
-        } catch {
-          setSources(previous);
-        }
-      })();
+      removedItem = prev.find((item) => item.id === sourceId);
       return prev.filter((item) => item.id !== sourceId);
     });
-  }, [user, strategyId]);
+
+    try {
+      await removeStudySource(user.uid, strategyId, sourceId);
+      setSourceTruthVersion((v) => v + 1);
+      setChatHistory([]);
+      setQuickActions({
+        difference: { loading: false, content: "" },
+        example: { loading: false, content: "" },
+        examQuestion: { loading: false, content: "" },
+        explainSimply: { loading: false, content: "" },
+      });
+      setLearnedItems({});
+      setMicroQuizzes({});
+      setExamMode(null);
+      setExpandedOriginalQuestions({});
+      setMobileChatOpen(false);
+
+      if (contextFiles.length) {
+        const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
+        const refreshed = await fetch("/api/study/topic", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic: topic?.title,
+            priority: topic?.priority,
+            outlineOnly: false,
+            files: contextFiles,
+            currentChapter: topic?.chapterTitle,
+            examTimeRemaining,
+            studyMode: "learn",
+            examMode: false,
+            userIntent: "topic overview and exam-focused summary",
+            userId: user.uid,
+            strategyId,
+            ...modelPayload,
+          }),
+        });
+
+        if (refreshed.ok) {
+          const refreshedData = (await refreshed.json()) as TopicStudyApiResponse;
+          setStudyData(refreshedData);
+        }
+      }
+
+      toast.info("Source removed \u2014 content refreshed.");
+    } catch {
+      if (removedItem) {
+        setSources((prev) => [...prev, removedItem!]);
+      }
+    }
+  }, [user, strategyId, topic, contextFiles, sessionExamDate, strategy, modelPayload]);
 
   const handleAddSourceFromUrl = useCallback(async (url: string, attempt = 0) => {
     if (!user || !strategyId) {
@@ -1199,6 +1255,18 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       const refreshed = await listStudySources(user.uid, strategyId);
       setSources(mergeSessionSources(refreshed, contextFiles));
+      setSourceTruthVersion((v) => v + 1);
+      setChatHistory([]);
+      setQuickActions({
+        difference: { loading: false, content: "" },
+        example: { loading: false, content: "" },
+        examQuestion: { loading: false, content: "" },
+        explainSimply: { loading: false, content: "" },
+      });
+      setLearnedItems({});
+      setMicroQuizzes({});
+      setExamMode(null);
+      setExpandedOriginalQuestions({});
       setSourceAddStatus("completed");
       toast.success("Source added", {
         id: youtubeProgressToastId,
@@ -1266,6 +1334,31 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
     return { nextTopicInChapter, nextChapterStart };
   }, [activeChapter, strategy, topic]);
+
+  const topicProgressLabel = useMemo(() => {
+    if (!activeChapter || !topic) {
+      return null;
+    }
+
+    const chapterTopics = activeChapter.topics;
+    const index = chapterTopics.findIndex((item) => item.slug === topic.slug);
+    if (index < 0) {
+      return null;
+    }
+
+    return `Topic ${index + 1} / ${chapterTopics.length}`;
+  }, [activeChapter, topic]);
+
+  const globalProgress = useMemo(() => {
+    if (!strategy) return { completed: 0, total: 0, percent: 0 };
+    const total = strategy.topics.length;
+    const completedCount = Object.values(topicCompletionMap).filter(Boolean).length;
+    return {
+      completed: completedCount,
+      total,
+      percent: total ? Math.round((completedCount / total) * 100) : 0,
+    };
+  }, [strategy, topicCompletionMap]);
 
   async function runQuickAction(action: QuickActionKey) {
     if (!strategyId || !topic || !user) {
@@ -1556,6 +1649,10 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       ]);
 
       setCompleted(true);
+      setTopicCompletionMap((current) => ({
+        ...current,
+        [topic.slug]: true,
+      }));
     } catch {
       // no-op fallback
     }
@@ -2265,6 +2362,24 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
           <ArrowLeft className="h-4 w-4" />
           Back to Dashboard
         </Button>
+        <div className="hidden md:flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-neutral-400 tabular-nums">{globalProgress.completed}/{globalProgress.total} topics</span>
+                <span className="text-[10px] text-neutral-500">{globalProgress.percent}%</span>
+              </div>
+              <div className="w-36 h-1 rounded-full bg-white/10 overflow-hidden">
+                <div className="h-full bg-orange-500 rounded-full transition-all duration-500" style={{ width: `${globalProgress.percent}%` }} />
+              </div>
+            </div>
+            {topicProgressLabel ? (
+              <span className="text-[11px] text-neutral-400 tabular-nums border-l border-white/10 pl-4">
+                {topicProgressLabel}
+              </span>
+            ) : null}
+          </div>
+        </div>
         <div className="flex items-center gap-3">
           <button
             type="button"

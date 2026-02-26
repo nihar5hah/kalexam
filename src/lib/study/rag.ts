@@ -876,7 +876,10 @@ async function getTopChunks(
         enabledSourceIds = enabledBundle.enabledSourceIds;
         enabledSourceTitleToId = enabledBundle.enabledSourceTitleToId;
       } catch {
-        // no-op
+        // Both chunk and bundle fetches failed — fail closed so no
+        // unfiltered content leaks through the truth filter.
+        enabledSourceIds = new Set();
+        enabledSourceTitleToId = new Map();
       }
     }
   }
