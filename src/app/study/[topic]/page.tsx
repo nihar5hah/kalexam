@@ -588,6 +588,19 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
   const sourcesBackfillAttemptedRef = useRef(false);
   const [, setSourceIndexLifecycle] = useState<SourceIndexLifecycle>("idle");
 
+  const getAuthHeaders = useCallback(async () => {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+
+    if (user) {
+      const token = await user.getIdToken();
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    return headers;
+  }, [user]);
+
   const setIndexLifecycle = useCallback((state: SourceIndexLifecycle) => {
     setSourceIndexLifecycle(state);
     console.info("[sources:index-lifecycle]", state);
@@ -707,7 +720,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       const response = await fetch("/api/study/topic", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           topic: selectedTopic.title,
           priority: selectedTopic.priority,
@@ -771,7 +784,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     }
 
     void load();
-  }, [strategyId, topicSlug, user]);
+  }, [strategyId, topicSlug, user, getAuthHeaders]);
 
   useEffect(() => {
     if (!user || !strategyId || !topic) {
@@ -992,7 +1005,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
         const refreshed = await fetch("/api/study/topic", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await getAuthHeaders(),
           body: JSON.stringify({
             topic: topic.title,
             priority: topic.priority,
@@ -1021,69 +1034,25 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         current.map((item) => (item.id === sourceId ? { ...item, enabled: !enabled } : item)),
       );
     }
-  }, [user, strategyId, topic, contextFiles, sessionExamDate, strategy, modelPayload]);
+  }, [user, strategyId, topic, contextFiles, sessionExamDate, strategy, modelPayload, getAuthHeaders]);
 
   const handleRemoveSource = useCallback(async (sourceId: string) => {
     if (!user || !strategyId) {
       return;
     }
 
-    let removedItem: (typeof sources)[number] | undefined;
     setSources((prev) => {
-      removedItem = prev.find((item) => item.id === sourceId);
+      const previous = prev;
+      void (async () => {
+        try {
+          await removeStudySource(user.uid, strategyId, sourceId);
+        } catch {
+          setSources(previous);
+        }
+      })();
       return prev.filter((item) => item.id !== sourceId);
     });
-
-    try {
-      await removeStudySource(user.uid, strategyId, sourceId);
-      setSourceTruthVersion((v) => v + 1);
-      setChatHistory([]);
-      setQuickActions({
-        difference: { loading: false, content: "" },
-        example: { loading: false, content: "" },
-        examQuestion: { loading: false, content: "" },
-        explainSimply: { loading: false, content: "" },
-      });
-      setLearnedItems({});
-      setMicroQuizzes({});
-      setExamMode(null);
-      setExpandedOriginalQuestions({});
-      setMobileChatOpen(false);
-
-      if (contextFiles.length) {
-        const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
-        const refreshed = await fetch("/api/study/topic", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            topic: topic?.title,
-            priority: topic?.priority,
-            outlineOnly: false,
-            files: contextFiles,
-            currentChapter: topic?.chapterTitle,
-            examTimeRemaining,
-            studyMode: "learn",
-            examMode: false,
-            userIntent: "topic overview and exam-focused summary",
-            userId: user.uid,
-            strategyId,
-            ...modelPayload,
-          }),
-        });
-
-        if (refreshed.ok) {
-          const refreshedData = (await refreshed.json()) as TopicStudyApiResponse;
-          setStudyData(refreshedData);
-        }
-      }
-
-      toast.info("Source removed \u2014 content refreshed.");
-    } catch {
-      if (removedItem) {
-        setSources((prev) => [...prev, removedItem!]);
-      }
-    }
-  }, [user, strategyId, topic, contextFiles, sessionExamDate, strategy, modelPayload]);
+  }, [user, strategyId]);
 
   const handleAddSourceFromUrl = useCallback(async (url: string, attempt = 0) => {
     if (!user || !strategyId) {
@@ -1255,18 +1224,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       const refreshed = await listStudySources(user.uid, strategyId);
       setSources(mergeSessionSources(refreshed, contextFiles));
-      setSourceTruthVersion((v) => v + 1);
-      setChatHistory([]);
-      setQuickActions({
-        difference: { loading: false, content: "" },
-        example: { loading: false, content: "" },
-        examQuestion: { loading: false, content: "" },
-        explainSimply: { loading: false, content: "" },
-      });
-      setLearnedItems({});
-      setMicroQuizzes({});
-      setExamMode(null);
-      setExpandedOriginalQuestions({});
       setSourceAddStatus("completed");
       toast.success("Source added", {
         id: youtubeProgressToastId,
@@ -1393,7 +1350,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/ask", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           topic: topic.title,
           question: actionPrompt[action],
@@ -1514,7 +1471,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/ask", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           topic: topic.title,
           question: resolvedQuestion,
@@ -1634,7 +1591,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     } finally {
       setAsking(false);
     }
-  }, [user, strategyId, topic, chatHistory, modelPayload, activeChapter, sessionExamDate, strategy, sourceTruthVersion]);
+  }, [user, strategyId, topic, chatHistory, modelPayload, activeChapter, sessionExamDate, strategy, sourceTruthVersion, getAuthHeaders]);
 
   const handleMarkCompleted = useCallback(async () => {
     if (!user || !strategyId || !topic) return;
@@ -1713,7 +1670,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/learn-item", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           topic: topic.title,
           item,
@@ -1836,7 +1793,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/exam-mode", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           topic: topic.title,
           files: contextFiles,
@@ -1894,7 +1851,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const examTimeRemaining = formatExamTimeRemaining(sessionExamDate, strategy?.strategySummary?.hoursLeft);
       const response = await fetch("/api/study/micro-quiz", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           topic: topic.title,
           files: contextFiles,

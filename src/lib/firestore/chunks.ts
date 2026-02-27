@@ -1,8 +1,11 @@
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   query,
+  serverTimestamp,
+  setDoc,
   where,
   writeBatch,
 } from "firebase/firestore";
@@ -13,6 +16,14 @@ import { StudySourceType } from "@/lib/firestore/sources";
 
 export type IndexedChunk = ParsedSourceChunk & {
   sourceId: string;
+};
+
+type IndexedChunkStored = IndexedChunk & {
+  _v?: number;
+};
+
+type IndexedChunkMeta = {
+  activeVersion?: number;
 };
 
 export type IndexedChunkBundle = {
@@ -32,6 +43,43 @@ function normalizeSourceTitle(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function indexedChunkCollection(uid: string, strategyId: string) {
+  const db = getFirebaseDb();
+  return collection(db, "users", uid, "strategies", strategyId, "indexedChunks");
+}
+
+function indexedChunkMetaRef(uid: string, strategyId: string) {
+  const db = getFirebaseDb();
+  return doc(db, "users", uid, "strategies", strategyId, "indexedChunksMeta", "current");
+}
+
+async function getActiveChunkVersion(uid: string, strategyId: string): Promise<number | undefined> {
+  const metaSnapshot = await getDoc(indexedChunkMetaRef(uid, strategyId));
+  if (!metaSnapshot.exists()) {
+    return undefined;
+  }
+
+  const meta = metaSnapshot.data() as IndexedChunkMeta;
+  return typeof meta.activeVersion === "number" ? meta.activeVersion : undefined;
+}
+
+async function setActiveChunkVersion(
+  uid: string,
+  strategyId: string,
+  activeVersion: number,
+  chunkCount: number,
+): Promise<void> {
+  await setDoc(
+    indexedChunkMetaRef(uid, strategyId),
+    {
+      activeVersion,
+      chunkCount,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
 function getEnabledSourceIds(
   sources: Array<{ id: string; enabled?: boolean }>,
 ): Set<string> {
@@ -47,25 +95,38 @@ export async function replaceIndexedChunks(
   strategyId: string,
   chunks: IndexedChunk[],
 ): Promise<void> {
-  const db = getFirebaseDb();
-  const chunkCollection = collection(db, "users", uid, "strategies", strategyId, "indexedChunks");
-  const existing = await getDocs(chunkCollection);
+  if (!chunks.length) {
+    return;
+  }
 
-  const operations: Array<{ type: "delete"; ref: (typeof existing.docs)[number]["ref"] } | { type: "set"; data: IndexedChunk }> = [
-    ...existing.docs.map((item) => ({ type: "delete" as const, ref: item.ref })),
-    ...chunks.map((chunk) => ({ type: "set" as const, data: chunk })),
-  ];
+  const db = getFirebaseDb();
+  const chunkCollection = indexedChunkCollection(uid, strategyId);
+  const activeVersion = await getActiveChunkVersion(uid, strategyId);
+  const nextVersion = (activeVersion ?? 0) + 1;
 
   const BATCH_LIMIT = 400;
-  for (let index = 0; index < operations.length; index += BATCH_LIMIT) {
+  for (let index = 0; index < chunks.length; index += BATCH_LIMIT) {
     const batch = writeBatch(db);
-    const slice = operations.slice(index, index + BATCH_LIMIT);
-    for (const operation of slice) {
-      if (operation.type === "delete") {
-        batch.delete(operation.ref);
-      } else {
-        batch.set(doc(chunkCollection), operation.data);
-      }
+    const slice = chunks.slice(index, index + BATCH_LIMIT);
+    for (const chunk of slice) {
+      batch.set(doc(chunkCollection), { ...chunk, _v: nextVersion } satisfies IndexedChunkStored);
+    }
+    await batch.commit();
+  }
+
+  await setActiveChunkVersion(uid, strategyId, nextVersion, chunks.length);
+
+  const existing = await getDocs(chunkCollection);
+  const oldRefs = existing.docs.filter((item) => {
+    const data = item.data() as IndexedChunkStored;
+    return data._v !== nextVersion;
+  });
+
+  for (let index = 0; index < oldRefs.length; index += BATCH_LIMIT) {
+    const batch = writeBatch(db);
+    const slice = oldRefs.slice(index, index + BATCH_LIMIT);
+    for (const item of slice) {
+      batch.delete(item.ref);
     }
     await batch.commit();
   }
@@ -102,7 +163,8 @@ export async function getIndexedChunks(
     };
   }
 
-  const chunkCollection = collection(db, "users", uid, "strategies", strategyId, "indexedChunks");
+  const activeVersion = await getActiveChunkVersion(uid, strategyId);
+  const chunkCollection = indexedChunkCollection(uid, strategyId);
   const chunkSnapshots = [];
   const enabledIdsList = [...enabledSourceIds];
   const FIRESTORE_IN_LIMIT = 10;
@@ -115,8 +177,22 @@ export async function getIndexedChunks(
 
   const chunks = chunkResults
     .flatMap((snapshot) => snapshot.docs)
-    .map((item) => item.data() as IndexedChunk)
-    .filter((chunk) => enabledSourceIds.has(chunk.sourceId));
+    .map((item) => item.data() as IndexedChunkStored)
+    .filter((chunk) => {
+      const versionMatches =
+        typeof activeVersion === "number"
+          ? chunk._v === activeVersion
+          : typeof chunk._v !== "number";
+      return versionMatches && enabledSourceIds.has(chunk.sourceId);
+    })
+    .map((chunk) => ({
+      sourceId: chunk.sourceId,
+      text: chunk.text,
+      sourceType: chunk.sourceType,
+      sourceName: chunk.sourceName,
+      sourceYear: chunk.sourceYear,
+      section: chunk.section,
+    }));
 
   return {
     chunks,
@@ -166,13 +242,18 @@ export async function appendIndexedChunks(
   }
 
   const db = getFirebaseDb();
-  const chunkCollection = collection(db, "users", uid, "strategies", strategyId, "indexedChunks");
+  const activeVersion = await getActiveChunkVersion(uid, strategyId);
+  const chunkCollection = indexedChunkCollection(uid, strategyId);
   const BATCH_LIMIT = 400;
   for (let index = 0; index < chunks.length; index += BATCH_LIMIT) {
     const batch = writeBatch(db);
     const slice = chunks.slice(index, index + BATCH_LIMIT);
     for (const chunk of slice) {
-      batch.set(doc(chunkCollection), chunk);
+      if (typeof activeVersion === "number") {
+        batch.set(doc(chunkCollection), { ...chunk, _v: activeVersion } satisfies IndexedChunkStored);
+      } else {
+        batch.set(doc(chunkCollection), chunk);
+      }
     }
     await batch.commit();
   }

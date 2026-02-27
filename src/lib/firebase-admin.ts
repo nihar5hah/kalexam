@@ -1,7 +1,12 @@
 import { cert, getApps, initializeApp, type App } from "firebase-admin/app";
+import { getAuth, type Auth } from "firebase-admin/auth";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 
 let cachedApp: App | undefined;
+
+function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === "production";
+}
 
 function getAdminApp(): App {
   if (cachedApp) {
@@ -26,6 +31,9 @@ function getAdminApp(): App {
         client_email?: string;
         private_key?: string;
       };
+      if (!parsed.client_email || !parsed.private_key) {
+        throw new Error("FIREBASE_SERVICE_ACCOUNT_KEY is missing required fields");
+      }
       cachedApp = initializeApp({
         credential: cert({
           projectId: parsed.project_id ?? projectId ?? undefined,
@@ -34,8 +42,18 @@ function getAdminApp(): App {
         }),
       });
       return cachedApp;
-    } catch {
-      // Fall through to other init methods
+    } catch (error) {
+      if (isProductionEnv()) {
+        throw new Error(
+          `Invalid FIREBASE_SERVICE_ACCOUNT_KEY configuration: ${
+            error instanceof Error ? error.message : "unknown error"
+          }`,
+        );
+      }
+
+      console.warn("[firebase-admin] FIREBASE_SERVICE_ACCOUNT_KEY is invalid, falling back", {
+        message: error instanceof Error ? error.message : "unknown error",
+      });
     }
   }
 
@@ -53,6 +71,12 @@ function getAdminApp(): App {
     return cachedApp;
   }
 
+  if (isProductionEnv() && (privateKey || clientEmail)) {
+    throw new Error(
+      "Incomplete Firebase Admin credential env vars: FIREBASE_PRIVATE_KEY, FIREBASE_CLIENT_EMAIL, and FIREBASE_PROJECT_ID are all required",
+    );
+  }
+
   // Application Default Credentials (GCP / Firebase hosting / GOOGLE_APPLICATION_CREDENTIALS)
   cachedApp = initializeApp({ projectId: projectId ?? undefined });
   return cachedApp;
@@ -60,4 +84,8 @@ function getAdminApp(): App {
 
 export function getAdminFirestore(): Firestore {
   return getFirestore(getAdminApp());
+}
+
+export function getAdminAuth(): Auth {
+  return getAuth(getAdminApp());
 }

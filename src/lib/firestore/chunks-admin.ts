@@ -13,6 +13,14 @@ export type IndexedChunk = ParsedSourceChunk & {
   sourceId: string;
 };
 
+type IndexedChunkStored = IndexedChunk & {
+  _v?: number;
+};
+
+type IndexedChunkMeta = {
+  activeVersion?: number;
+};
+
 export type IndexedChunkBundle = {
   chunks: IndexedChunk[];
   sourceTypeMap: Map<string, StudySourceType>;
@@ -28,6 +36,28 @@ export type EnabledSourceBundle = {
 
 function normalizeSourceTitle(value: string): string {
   return value.trim().toLowerCase();
+}
+
+async function getActiveChunkVersionAdmin(
+  db: FirebaseFirestore.Firestore,
+  uid: string,
+  strategyId: string,
+): Promise<number | undefined> {
+  const snapshot = await db
+    .collection("users")
+    .doc(uid)
+    .collection("strategies")
+    .doc(strategyId)
+    .collection("indexedChunksMeta")
+    .doc("current")
+    .get();
+
+  if (!snapshot.exists) {
+    return undefined;
+  }
+
+  const data = snapshot.data() as IndexedChunkMeta;
+  return typeof data.activeVersion === "number" ? data.activeVersion : undefined;
 }
 
 export async function getIndexedChunksAdmin(
@@ -72,6 +102,8 @@ export async function getIndexedChunksAdmin(
     };
   }
 
+  const activeVersion = await getActiveChunkVersionAdmin(db, uid, strategyId);
+
   const chunksRef = db
     .collection("users")
     .doc(uid)
@@ -93,8 +125,22 @@ export async function getIndexedChunksAdmin(
 
   const chunks = chunkResults
     .flatMap((snapshot) => snapshot.docs)
-    .map((item) => item.data() as IndexedChunk)
-    .filter((chunk) => enabledSourceIds.has(chunk.sourceId));
+    .map((item) => item.data() as IndexedChunkStored)
+    .filter((chunk) => {
+      const versionMatches =
+        typeof activeVersion === "number"
+          ? chunk._v === activeVersion
+          : typeof chunk._v !== "number";
+      return versionMatches && enabledSourceIds.has(chunk.sourceId);
+    })
+    .map((chunk) => ({
+      sourceId: chunk.sourceId,
+      text: chunk.text,
+      sourceType: chunk.sourceType,
+      sourceName: chunk.sourceName,
+      sourceYear: chunk.sourceYear,
+      section: chunk.section,
+    }));
 
   return {
     chunks,

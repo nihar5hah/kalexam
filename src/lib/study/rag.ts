@@ -14,7 +14,7 @@ import {
   generateWithModelRouterStream,
 } from "@/lib/ai/modelRouter";
 import { generateWithGeminiModel } from "@/lib/ai/providers/gemini";
-import { getIndexedChunksAdmin, getEnabledSourceBundleAdmin } from "@/lib/firestore/chunks-admin";
+import { getIndexedChunksAdmin } from "@/lib/firestore/chunks-admin";
 import { parseUploadedFiles } from "@/lib/parsing";
 import { ParsedSourceChunk } from "@/lib/parsing/types";
 import { computeExamLikelihood, examLikelihoodLabel } from "@/lib/study/exam-likelihood";
@@ -834,6 +834,7 @@ async function getTopChunks(
   let sourceTypeMap: Map<string, StudySourceType> | undefined;
   let enabledSourceIds: Set<string> | undefined;
   let enabledSourceTitleToId: Map<string, string> | undefined;
+  const retrievalWarnings: string[] = [];
 
   if (options?.userId && options.strategyId) {
     try {
@@ -855,6 +856,10 @@ async function getTopChunks(
           },
           topPreviousPaperChunk: undefined,
           usedVideoContext: false,
+          retrievalMeta: {
+            usedParseFallback: false,
+            warnings: retrievalWarnings,
+          },
           retrievedChunks: options?.debugRetrieval
             ? []
             : undefined,
@@ -868,16 +873,14 @@ async function getTopChunks(
           sourceKind: inferSourceKind(chunk, indexedBundle.sourceTypeMap, chunk.sourceId),
         }));
       }
-    } catch {
-      // fallback to parsing files
-      try {
-        const enabledBundle = await getEnabledSourceBundleAdmin(options.userId, options.strategyId);
-        sourceTypeMap = enabledBundle.sourceTypeMap;
-        enabledSourceIds = enabledBundle.enabledSourceIds;
-        enabledSourceTitleToId = enabledBundle.enabledSourceTitleToId;
-      } catch {
-        // no-op
-      }
+    } catch (error) {
+      retrievalWarnings.push("indexed_chunk_read_failed");
+      console.error("[RAG] indexed chunk retrieval failed — falling back to file parsing", {
+        userId: options.userId,
+        strategyId: options.strategyId,
+        message: error instanceof Error ? error.message : "unknown error",
+      });
+      // enabledSourceIds stays undefined — parse fallback will pass all chunks
     }
   }
 
@@ -925,6 +928,10 @@ async function getTopChunks(
       },
       topPreviousPaperChunk: undefined,
       usedVideoContext: false,
+      retrievalMeta: {
+        usedParseFallback: parsedContextChunks.length === 0,
+        warnings: retrievalWarnings,
+      },
       retrievedChunks: options?.debugRetrieval
         ? []
         : undefined,
@@ -1002,26 +1009,28 @@ async function getTopChunks(
   const youtubeChunks = truthFilteredChunks.filter((item) => item.sourceKind === "youtube").length;
   const pdfChunks = truthFilteredChunks.filter((item) => item.sourceKind === "pdf").length;
   const usedSourceTypes = Array.from(new Set(selected.map((item) => item.sourceKind)));
-  console.log("[RAG] sources used:", {
-    enabledSources: enabledSourceIds ? [...enabledSourceIds] : [],
-    totalChunks: truthFilteredChunks.length,
-    youtubeChunks,
-    pdfChunks,
-    retrievedChunks: overlapBoost.slice(0, Math.max(effectiveMaxChunks * 3, 12)).map((item) => ({
-      sourceId: item.sourceId,
-      sourceName: item.chunk.sourceName,
-      sourceType: item.sourceKind,
-      score: Number(item.score.toFixed(3)),
-    })),
-    selectedChunks: selected.map((item) => ({
-      sourceId: item.sourceId,
-      sourceName: item.chunk.sourceName,
-      sourceType: item.sourceKind,
-      score: Number(item.score.toFixed(3)),
-    })),
-    usedSourceTypes,
-    selectedYoutubeChunks: selected.filter((item) => item.sourceKind === "youtube").length,
-  });
+  if (options?.debugRetrieval) {
+    console.log("[RAG] sources used:", {
+      enabledSources: enabledSourceIds ? [...enabledSourceIds] : [],
+      totalChunks: truthFilteredChunks.length,
+      youtubeChunks,
+      pdfChunks,
+      retrievedChunks: overlapBoost.slice(0, Math.max(effectiveMaxChunks * 3, 12)).map((item) => ({
+        sourceId: item.sourceId,
+        sourceName: item.chunk.sourceName,
+        sourceType: item.sourceKind,
+        score: Number(item.score.toFixed(3)),
+      })),
+      selectedChunks: selected.map((item) => ({
+        sourceId: item.sourceId,
+        sourceName: item.chunk.sourceName,
+        sourceType: item.sourceKind,
+        score: Number(item.score.toFixed(3)),
+      })),
+      usedSourceTypes,
+      selectedYoutubeChunks: selected.filter((item) => item.sourceKind === "youtube").length,
+    });
+  }
 
   const averageCoverage = parsed?.chapters.length
     ? Math.round(
@@ -1053,6 +1062,10 @@ async function getTopChunks(
     examLikelihood: likelihood,
     topPreviousPaperChunk: selected.find((item) => item.chunk.sourceType === "Previous Paper")?.chunk,
     usedVideoContext: selected.some((item) => item.sourceKind === "youtube"),
+    retrievalMeta: {
+      usedParseFallback: parsedContextChunks.length === 0,
+      warnings: retrievalWarnings,
+    },
     retrievedChunks: options?.debugRetrieval
       ? overlapBoost.slice(0, Math.max(maxChunks * 3, 12)).map((item) => ({
         sourceName: item.chunk.sourceName,

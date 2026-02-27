@@ -506,9 +506,13 @@ export function UploadForm() {
 
       void Promise.allSettled(
         topTopics.map(async (topic) => {
+          const authToken = await user.getIdToken();
           const precomputeResponse = await fetch("/api/study/topic", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${authToken}`,
+            },
             body: JSON.stringify({
               topic: topic.title,
               priority: topic.priority,
@@ -555,7 +559,10 @@ export function UploadForm() {
           if (typeof learnNowSeed === "string" && learnNowSeed.trim()) {
             const learnResponse = await fetch("/api/study/learn-item", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${authToken}`,
+              },
               body: JSON.stringify({
                 topic: topic.title,
                 item: learnNowSeed,
