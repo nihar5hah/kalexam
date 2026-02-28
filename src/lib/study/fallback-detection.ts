@@ -20,6 +20,7 @@ export function isFallbackLikeText(value: unknown): boolean {
     normalized === fallback ||
     normalized.startsWith(fallback) ||
     normalized.includes("not found in uploaded material") ||
+    normalized.includes("not directly found in your material") ||
     normalized.includes("no matching concept found")
   );
 }

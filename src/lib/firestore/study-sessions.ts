@@ -645,6 +645,10 @@ export async function getChatCacheFromSession(
     return null;
   }
 
+  if (isFallbackLikeChatPayload({ answer: entry.answer })) {
+    return null;
+  }
+
   return {
     answer: entry.answer,
     confidence: entry.confidence,
@@ -673,6 +677,10 @@ export async function saveChatCacheToSession(
     }>;
   },
 ) {
+  if (isFallbackLikeChatPayload({ answer: payload.answer })) {
+    return;
+  }
+
   const sessionRef = await getSessionRefByStrategyId(userId, strategyId);
   if (!sessionRef) {
     return;

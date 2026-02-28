@@ -123,17 +123,30 @@ export async function getIndexedChunksAdmin(
 
   const chunkResults = await Promise.all(chunkPromises);
 
-  const chunks = chunkResults
+  const rawChunks = chunkResults
     .flatMap((snapshot) => snapshot.docs)
-    .map((item) => item.data() as IndexedChunkStored)
-    .filter((chunk) => {
-      const versionMatches =
-        typeof activeVersion === "number"
-          ? chunk._v === activeVersion
-          : typeof chunk._v !== "number";
-      return versionMatches && enabledSourceIds.has(chunk.sourceId);
-    })
-    .map((chunk) => ({
+    .map((item) => item.data() as IndexedChunkStored);
+
+  let filteredChunks = rawChunks.filter((chunk) => {
+    const versionMatches =
+      typeof activeVersion === "number"
+        ? chunk._v === activeVersion
+        : typeof chunk._v !== "number";
+    return versionMatches && enabledSourceIds.has(chunk.sourceId);
+  });
+
+  if (filteredChunks.length === 0 && rawChunks.length > 0) {
+    console.warn("[chunks-admin] version filter yielded 0 chunks — ignoring version", {
+      uid,
+      strategyId,
+      activeVersion,
+      rawChunkCount: rawChunks.length,
+      chunkVersions: [...new Set(rawChunks.map((chunk) => chunk._v))],
+    });
+    filteredChunks = rawChunks.filter((chunk) => enabledSourceIds.has(chunk.sourceId));
+  }
+
+  const chunks = filteredChunks.map((chunk) => ({
       sourceId: chunk.sourceId,
       text: chunk.text,
       sourceType: chunk.sourceType,

@@ -635,11 +635,6 @@ function parseWeightageScore(sourceName: string): number {
   return Number.isFinite(value) && value >= 15 ? 1 : 0;
 }
 
-function hasTokenMatch(text: string, tokens: string[]): boolean {
-  const normalized = text.toLowerCase();
-  return tokens.some((token) => normalized.includes(token));
-}
-
 function toFallbackReason(error: unknown): string {
   if (error && typeof error === "object" && "code" in error) {
     const code = String((error as { code?: unknown }).code ?? "").trim();
@@ -872,6 +867,13 @@ async function getTopChunks(
           chunk,
           sourceKind: inferSourceKind(chunk, indexedBundle.sourceTypeMap, chunk.sourceId),
         }));
+      } else if (enabledSourceIds.size > 0) {
+        retrievalWarnings.push("indexed_chunks_empty_despite_sources");
+        console.warn("[RAG] indexed chunks empty despite enabled sources — will parse files", {
+          userId: options.userId,
+          strategyId: options.strategyId,
+          enabledSourceCount: enabledSourceIds.size,
+        });
       }
     } catch (error) {
       retrievalWarnings.push("indexed_chunk_read_failed");
@@ -900,14 +902,20 @@ async function getTopChunks(
         if (!enabledSourceIds) {
           return true;
         }
-        return Boolean(item.sourceId && enabledSourceIds.has(item.sourceId));
+        if (!item.sourceId) {
+          return true;
+        }
+        return enabledSourceIds.has(item.sourceId);
       });
 
   const truthFilteredChunks = sourceChunks.filter((item) => {
     if (!enabledSourceIds) {
       return true;
     }
-    return Boolean(item.sourceId && enabledSourceIds.has(item.sourceId));
+    if (!item.sourceId) {
+      return true;
+    }
+    return enabledSourceIds.has(item.sourceId);
   });
 
   if (!truthFilteredChunks.length) {
@@ -1485,12 +1493,7 @@ export async function answerTopicQuestion(
 
   if (!retrieval.chunks.length) {
     return {
-      answer: [
-        "Not directly found in your material, but here is a helpful explanation based on related concepts.",
-        "",
-        `For **${topic}**, think of this question as: ${question}.`,
-        "Start by defining the core idea in one line, then explain how it works in simple steps, and finally connect it to a likely exam-style use case.",
-      ].join("\n"),
+      answer: "I couldn't retrieve enough context from your uploaded material to answer this accurately.\n\nTry re-uploading your study files or asking a more specific question about a topic from your material.",
       confidence: "low",
       citations: [],
       usedVideoContext: false,
@@ -1510,13 +1513,11 @@ export async function answerTopicQuestion(
 
   const prompt = [
     "You are an exam tutor.",
-    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
-    "Answer the question using this priority:",
-    "1) Use uploaded material first.",
-    "2) If not directly found, provide a short relevant educational explanation.",
-    '3) If using broader explanation, start with exactly: "Not directly found in your material, but relevant:"',
-    "Never invent exam facts that are not supported by context.",
-    "Keep answer concise: 4 to 7 sentences maximum.",
+    "The following context comes from the student's own uploaded study material.",
+    "Answer the question using ONLY this context. Do NOT say the information is not in their material \u2014 it IS their material.",
+    "If context comes from a video source, mention that.",
+    "Never invent exam facts not supported by the context below.",
+    "Keep your answer concise: 4 to 7 sentences maximum.",
     `Topic: ${topic}`,
     `Question: ${question}`,
     ...buildContextEnvelope(generationContext),
@@ -1537,9 +1538,14 @@ export async function answerTopicQuestion(
       },
       0.3,
     );
-    const answerText = response.text
+    let answerText = response.text
       .replace(/^```[\s\S]*?\n/, "")
       .replace(/```$/, "")
+      .trim();
+
+    // Strip any residual "Not directly found" prefix the LLM may still emit
+    answerText = answerText
+      .replace(/^not directly found in your material[^\n]*[:.]?\s*/i, "")
       .trim();
 
     if (!answerText) {
@@ -1547,38 +1553,6 @@ export async function answerTopicQuestion(
         answer: FALLBACK_MESSAGE,
         confidence: "low",
         citations: [],
-        routingMeta: response.meta,
-      };
-    }
-
-    const queryTokens = tokenize(`${topic} ${question}`);
-    const isGrounded = hasTokenMatch(answerText, queryTokens);
-    if (!isGrounded) {
-      if (retrieval.score >= 5) {
-        const normalized = answerText.startsWith("Not directly found in your material, but relevant:")
-          ? answerText
-          : `Not directly found in your material, but relevant:\n\n${answerText}`;
-
-        return {
-          answer: normalized,
-          confidence: confidence === "high" ? "medium" : "low",
-          citations: retrieval.citations,
-          usedVideoContext: retrieval.usedVideoContext,
-          retrievedChunks: retrieval.retrievedChunks,
-          routingMeta: response.meta,
-        };
-      }
-
-      const normalized = answerText.startsWith("Not directly found in your material")
-        ? answerText
-        : `Not directly found in your material, but here is a helpful explanation based on related concepts.\n\n${answerText}`;
-
-      return {
-        answer: normalized,
-        confidence: "low",
-        citations: retrieval.citations,
-        usedVideoContext: retrieval.usedVideoContext,
-        retrievedChunks: retrieval.retrievedChunks,
         routingMeta: response.meta,
       };
     }
@@ -1592,10 +1566,8 @@ export async function answerTopicQuestion(
       routingMeta: response.meta,
     };
   } catch (error) {
-    const fallbackAnswer =
-      "Not directly found in your material, but here is a helpful explanation based on related concepts.\n\nFocus on the core definition, process, and one exam-ready example.";
     return {
-      answer: fallbackAnswer || FALLBACK_MESSAGE,
+      answer: FALLBACK_MESSAGE,
       confidence: "low",
       citations: retrieval.citations,
       usedVideoContext: retrieval.usedVideoContext,
@@ -1630,12 +1602,7 @@ export async function answerTopicQuestionStream(
 
   if (!retrieval.chunks.length) {
     return {
-      answer: [
-        "Not directly found in your material, but here is a helpful explanation based on related concepts.",
-        "",
-        `For **${topic}**, think of this question as: ${question}.`,
-        "Start by defining the core idea in one line, then explain how it works in simple steps, and finally connect it to a likely exam-style use case.",
-      ].join("\n"),
+      answer: "I couldn't retrieve enough context from your uploaded material to answer this accurately.\n\nTry re-uploading your study files or asking a more specific question about a topic from your material.",
       confidence: "low",
       citations: [],
       usedVideoContext: false,
@@ -1655,13 +1622,11 @@ export async function answerTopicQuestionStream(
 
   const prompt = [
     "You are an exam tutor.",
-    "ONLY use provided context chunks. If context comes from video, explicitly reference it.",
-    "Answer the question using this priority:",
-    "1) Use uploaded material first.",
-    "2) If not directly found, provide a short relevant educational explanation.",
-    '3) If using broader explanation, start with exactly: "Not directly found in your material, but relevant:"',
-    "Never invent exam facts that are not supported by context.",
-    "Keep answer concise: 4 to 7 sentences maximum.",
+    "The following context comes from the student's own uploaded study material.",
+    "Answer the question using ONLY this context. Do NOT say the information is not in their material \u2014 it IS their material.",
+    "If context comes from a video source, mention that.",
+    "Never invent exam facts not supported by the context below.",
+    "Keep your answer concise: 4 to 7 sentences maximum.",
     `Topic: ${topic}`,
     `Question: ${question}`,
     ...buildContextEnvelope(generationContext),
@@ -1689,9 +1654,14 @@ export async function answerTopicQuestionStream(
       0.3,
     );
 
-    const answerText = response.text
+    let answerText = response.text
       .replace(/^```[\s\S]*?\n/, "")
       .replace(/```$/, "")
+      .trim();
+
+    // Strip any residual "Not directly found" prefix the LLM may still emit
+    answerText = answerText
+      .replace(/^not directly found in your material[^\n]*[:.]?\s*/i, "")
       .trim();
 
     if (!answerText) {
@@ -1699,38 +1669,6 @@ export async function answerTopicQuestionStream(
         answer: FALLBACK_MESSAGE,
         confidence: "low",
         citations: [],
-        routingMeta: response.meta,
-      };
-    }
-
-    const queryTokens = tokenize(`${topic} ${question}`);
-    const isGrounded = hasTokenMatch(answerText, queryTokens);
-    if (!isGrounded) {
-      if (retrieval.score >= 5) {
-        const normalized = answerText.startsWith("Not directly found in your material, but relevant:")
-          ? answerText
-          : `Not directly found in your material, but relevant:\n\n${answerText}`;
-
-        return {
-          answer: normalized,
-          confidence: confidence === "high" ? "medium" : "low",
-          citations: retrieval.citations,
-          usedVideoContext: retrieval.usedVideoContext,
-          retrievedChunks: retrieval.retrievedChunks,
-          routingMeta: response.meta,
-        };
-      }
-
-      const normalized = answerText.startsWith("Not directly found in your material")
-        ? answerText
-        : `Not directly found in your material, but here is a helpful explanation based on related concepts.\n\n${answerText}`;
-
-      return {
-        answer: normalized,
-        confidence: "low",
-        citations: retrieval.citations,
-        usedVideoContext: retrieval.usedVideoContext,
-        retrievedChunks: retrieval.retrievedChunks,
         routingMeta: response.meta,
       };
     }
@@ -1744,10 +1682,8 @@ export async function answerTopicQuestionStream(
       routingMeta: response.meta,
     };
   } catch (error) {
-    const fallbackAnswer =
-      "Not directly found in your material, but here is a helpful explanation based on related concepts.\n\nFocus on the core definition, process, and one exam-ready example.";
     return {
-      answer: fallbackAnswer || FALLBACK_MESSAGE,
+      answer: FALLBACK_MESSAGE,
       confidence: "low",
       citations: retrieval.citations,
       usedVideoContext: retrieval.usedVideoContext,
