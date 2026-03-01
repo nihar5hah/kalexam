@@ -1230,6 +1230,18 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       const refreshed = await listStudySources(user.uid, strategyId);
       setSources(mergeSessionSources(refreshed, contextFiles));
+      setSourceTruthVersion((current) => current + 1);
+      setChatHistory([]);
+      setQuickActions({
+        difference: { loading: false, content: "" },
+        example: { loading: false, content: "" },
+        examQuestion: { loading: false, content: "" },
+        explainSimply: { loading: false, content: "" },
+      });
+      setLearnedItems({});
+      setMicroQuizzes({});
+      setExamMode(null);
+      setExpandedOriginalQuestions({});
       setSourceAddStatus("completed");
       toast.success("Source added", {
         id: youtubeProgressToastId,
