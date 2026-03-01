@@ -79,12 +79,10 @@ git clone https://github.com/nihar5hah/kalexam.git
 cd kalexam
 
 # Install dependencies
-cd frontend && npm install
-cd ../backend && npm install
+npm install
 
 # Configure environment variables
-cp frontend/.env.example frontend/.env.local
-cp backend/.env.example backend/.env.local
+cp .env.example .env.local
 ```
 
 ### Environment Setup
@@ -103,18 +101,9 @@ FIREBASE_PRIVATE_KEY=...            # PEM private key (newlines as \n)
 FIREBASE_PROJECT_ID=...             # can also fall back to NEXT_PUBLIC_FIREBASE_PROJECT_ID
 ```
 
-**Backend** (`.env.local`):
-```
-FIREBASE_PRIVATE_KEY=...
-FIREBASE_PROJECT_ID=...
-AI_PROVIDER=gemini  # or openai, custom
-AI_API_KEY=...
-```
-
 ### Local Development
 
 ```bash
-# From frontend directory
 npm run dev
 
 # Runs on http://localhost:3000
@@ -123,11 +112,7 @@ npm run dev
 ### Build & Deploy
 
 ```bash
-# Frontend build
-cd frontend && npm run build
-
-# Backend (if deploying separately)
-cd backend && npm run build
+npm run build
 ```
 
 ---
@@ -316,7 +301,7 @@ POST /api/study/exam-mode
 
 ## 📄 License
 
-This project is licensed under the **MIT License** — see [LICENSE](./LICENSE) for details.
+This project is licensed under the [MIT License](./LICENSE).
 
 ---
 
@@ -340,9 +325,7 @@ Contributions are welcome! Please follow these steps:
 
 ## 💬 Support
 
-- **Issues**: Open a GitHub issue for bugs or feature requests
-- **Discussions**: Join our community discussions
-- **Email**: support@kalexam.com (placeholder)
+- **Issues**: [Open a GitHub issue](https://github.com/nihar5hah/KalExam/issues) for bugs or feature requests
 
 ---
 

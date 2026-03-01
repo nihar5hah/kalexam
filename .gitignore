@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# create-next-app template leftovers
+public/file.svg
+public/globe.svg
+public/next.svg
+public/vercel.svg
+public/window.svg

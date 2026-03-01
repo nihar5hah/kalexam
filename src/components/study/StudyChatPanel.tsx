@@ -118,7 +118,7 @@ function DesktopStudyChatPanelComponent({
   chatEndRef: RefObject<HTMLDivElement | null>;
 }) {
   return (
-    <div className="hidden md:flex w-[380px] xl:w-[420px] flex-shrink-0 flex-col px-4 pt-4 pb-[68px]">
+    <div className="hidden md:flex w-[380px] xl:w-[420px] flex-shrink-0 flex-col px-4 pt-6 pb-[68px]">
       <Card className="flex-1 flex flex-col min-h-0 rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl shadow-2xl overflow-hidden">
         <CardHeader className="px-5 pt-5 pb-3 flex-shrink-0 border-b border-white/[0.07]">
           <CardTitle className="text-white text-base font-semibold tracking-tight">Ask about this topic</CardTitle>
