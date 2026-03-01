@@ -848,6 +848,12 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
 
       sourcesBackfillAttemptedRef.current = true;
 
+      // Fetch existing Firestore sources to preserve YouTube URLs during backfill
+      const existingSources = await listStudySources(user.uid, strategyId);
+      const existingYoutubeUrls = existingSources
+        .filter((s) => s.type === "youtube" && s.youtubeUrl && s.status !== "error")
+        .map((s) => s.youtubeUrl!);
+
       const toastId = toast.loading("Indexing your uploaded files…");
       let attempts = 0;
       const maxRetries = 1;
@@ -871,7 +877,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
             body: JSON.stringify({
               files: contextFiles,
               syllabusTextInput: "",
-              youtubeUrls: [],
+              youtubeUrls: existingYoutubeUrls,
               websiteUrls: [],
             }),
           });
