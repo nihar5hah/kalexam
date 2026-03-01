@@ -687,7 +687,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       setContextFiles(allFiles);
 
       const cacheEntry = stored.studyCache?.[topicSlug];
-      const expectedSignature = `${STUDY_CACHE_SCHEMA_VERSION}:${selectedTopic.slug}:${allFiles.map((file) => file.url).join("|")}`;
+      const expectedSignature = `${STUDY_CACHE_SCHEMA_VERSION}:${selectedTopic.slug}:${allFiles.map((file) => file.url).join("|")}:source-truth:${sourceTruthVersion}`;
       const cached =
         cacheEntry &&
         cacheEntry.signature === expectedSignature &&
@@ -784,7 +784,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
     }
 
     void load();
-  }, [strategyId, topicSlug, user, getAuthHeaders]);
+  }, [strategyId, topicSlug, user, getAuthHeaders, sourceTruthVersion]);
 
   useEffect(() => {
     if (!user || !strategyId || !topic) {
@@ -853,6 +853,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const existingYoutubeUrls = existingSources
         .filter((s) => s.type === "youtube" && s.youtubeUrl && s.status !== "error")
         .map((s) => s.youtubeUrl!);
+      console.log("[YouTube-RAG-Verify] backfill detected YouTube URLs:", existingYoutubeUrls.length, existingYoutubeUrls);
 
       const toastId = toast.loading("Indexing your uploaded files…");
       let attempts = 0;
@@ -1231,6 +1232,7 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const refreshed = await listStudySources(user.uid, strategyId);
       setSources(mergeSessionSources(refreshed, contextFiles));
       setSourceTruthVersion((current) => current + 1);
+      console.log("[YouTube-RAG-Verify] cache invalidated after source addition — sourceTruthVersion incremented, all cached content cleared");
       setChatHistory([]);
       setQuickActions({
         difference: { loading: false, content: "" },
