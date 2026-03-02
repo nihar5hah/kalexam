@@ -853,7 +853,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const existingYoutubeUrls = existingSources
         .filter((s) => s.type === "youtube" && s.youtubeUrl && s.status !== "error")
         .map((s) => s.youtubeUrl!);
-      console.log("[YouTube-RAG-Verify] backfill detected YouTube URLs:", existingYoutubeUrls.length, existingYoutubeUrls);
 
       const toastId = toast.loading("Indexing your uploaded files…");
       let attempts = 0;
@@ -1185,8 +1184,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         }
 
         try {
-          const youtubeChunkSourceIds = [...new Set(payload.chunks.filter((c) => payload.sources.find((s) => s.id === c.sourceId && s.type === "youtube")).map((c) => c.sourceId))];
-          console.log("[YouTube-RAG-Verify] appendIndexedChunks sourceIds:", youtubeChunkSourceIds, "totalChunks:", payload.chunks.length);
           await appendIndexedChunks(
             user.uid,
             strategyId,
@@ -1234,7 +1231,6 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
       const refreshed = await listStudySources(user.uid, strategyId);
       setSources(mergeSessionSources(refreshed, contextFiles));
       setSourceTruthVersion((current) => current + 1);
-      console.log("[YouTube-RAG-Verify] cache invalidated after source addition — sourceTruthVersion incremented, all cached content cleared");
       setChatHistory([]);
       setQuickActions({
         difference: { loading: false, content: "" },

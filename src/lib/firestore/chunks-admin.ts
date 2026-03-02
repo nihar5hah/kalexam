@@ -127,16 +127,6 @@ export async function getIndexedChunksAdmin(
     .flatMap((snapshot) => snapshot.docs)
     .map((item) => item.data() as IndexedChunkStored);
 
-  console.log("[YouTube-RAG-Verify] getIndexedChunksAdmin query", {
-    uid,
-    strategyId,
-    activeVersion,
-    enabledSourceIds: [...enabledSourceIds],
-    rawChunkCount: rawChunks.length,
-    rawChunkSourceIds: [...new Set(rawChunks.map((c) => c.sourceId))],
-    rawChunkVersions: [...new Set(rawChunks.map((c) => c._v))],
-  });
-
   let filteredChunks = rawChunks.filter((chunk) => {
     const versionMatches =
       typeof activeVersion === "number"

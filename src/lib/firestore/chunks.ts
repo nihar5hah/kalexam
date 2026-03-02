@@ -43,6 +43,22 @@ function normalizeSourceTitle(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * Strip undefined values from a chunk before writing to Firestore.
+ * Firestore's client SDK rejects documents with undefined field values,
+ * which causes the entire batch to fail silently (caught as session-cache fallback).
+ * Fields like sourceYear are optional and may be undefined for YouTube/URL sources.
+ */
+function sanitizeChunkForFirestore(chunk: IndexedChunkStored): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(chunk)) {
+    if (value !== undefined) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 function indexedChunkCollection(uid: string, strategyId: string) {
   const db = getFirebaseDb();
   return collection(db, "users", uid, "strategies", strategyId, "indexedChunks");
@@ -109,7 +125,7 @@ export async function replaceIndexedChunks(
     const batch = writeBatch(db);
     const slice = chunks.slice(index, index + BATCH_LIMIT);
     for (const chunk of slice) {
-      batch.set(doc(chunkCollection), { ...chunk, _v: nextVersion } satisfies IndexedChunkStored);
+      batch.set(doc(chunkCollection), sanitizeChunkForFirestore({ ...chunk, _v: nextVersion }));
     }
     await batch.commit();
   }
@@ -243,36 +259,18 @@ export async function appendIndexedChunks(
 
   const db = getFirebaseDb();
   const activeVersion = await getActiveChunkVersion(uid, strategyId);
-  console.log("[YouTube-RAG-Verify] appendIndexedChunks start", {
-    uid,
-    strategyId,
-    activeVersion,
-    chunkCount: chunks.length,
-    sourceIds: [...new Set(chunks.map((c) => c.sourceId))],
-  });
   const chunkCollection = indexedChunkCollection(uid, strategyId);
   const BATCH_LIMIT = 400;
-  try {
-    for (let index = 0; index < chunks.length; index += BATCH_LIMIT) {
-      const batch = writeBatch(db);
-      const slice = chunks.slice(index, index + BATCH_LIMIT);
-      for (const chunk of slice) {
-        if (typeof activeVersion === "number") {
-          batch.set(doc(chunkCollection), { ...chunk, _v: activeVersion } satisfies IndexedChunkStored);
-        } else {
-          batch.set(doc(chunkCollection), chunk);
-        }
+  for (let index = 0; index < chunks.length; index += BATCH_LIMIT) {
+    const batch = writeBatch(db);
+    const slice = chunks.slice(index, index + BATCH_LIMIT);
+    for (const chunk of slice) {
+      if (typeof activeVersion === "number") {
+        batch.set(doc(chunkCollection), sanitizeChunkForFirestore({ ...chunk, _v: activeVersion }));
+      } else {
+        batch.set(doc(chunkCollection), sanitizeChunkForFirestore(chunk));
       }
-      await batch.commit();
-      console.log("[YouTube-RAG-Verify] appendIndexedChunks batch committed", { batchIndex: index, batchSize: slice.length });
     }
-    console.log("[YouTube-RAG-Verify] appendIndexedChunks complete", { chunkCount: chunks.length });
-  } catch (error) {
-    console.error("[YouTube-RAG-Verify] appendIndexedChunks FAILED", {
-      uid,
-      strategyId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    throw error;
+    await batch.commit();
   }
 }
