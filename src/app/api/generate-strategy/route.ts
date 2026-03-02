@@ -229,7 +229,8 @@ export async function POST(request: Request) {
         modelUsed: modelLabel,
       },
     });
-  } catch {
+  } catch (error) {
+    console.error("[api/generate-strategy] Unhandled error:", error);
     return NextResponse.json({ error: "Unable to generate strict source-aware strategy" }, { status: 500 });
   }
 }

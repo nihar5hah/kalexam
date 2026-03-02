@@ -119,7 +119,8 @@ export async function POST(request: Request) {
             type: "done",
             payload: answer,
           });
-        } catch {
+        } catch (streamError) {
+          console.error("[api/study/ask] Stream error:", streamError);
           enqueueSseEvent(controller, encoder, {
             type: "error",
             message: "Unable to generate response right now.",
@@ -135,6 +136,7 @@ export async function POST(request: Request) {
     if (error instanceof RequestAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
+    console.error("[api/study/ask] Unhandled error:", error);
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 }

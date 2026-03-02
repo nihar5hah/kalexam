@@ -27,7 +27,7 @@ export async function getAuthenticatedUid(request: Request): Promise<string> {
   const token = extractBearerToken(request);
 
   try {
-    const decoded = await getAdminAuth().verifyIdToken(token, true);
+    const decoded = await getAdminAuth().verifyIdToken(token);
     return decoded.uid;
   } catch {
     throw new RequestAuthError("Invalid authentication token", 401);

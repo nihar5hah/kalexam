@@ -117,7 +117,8 @@ export async function POST(request: Request) {
             type: "done",
             payload: content,
           });
-        } catch {
+        } catch (streamError) {
+          console.error("[api/study/learn-item] Stream error:", streamError);
           enqueueSseEvent(controller, encoder, {
             type: "error",
             message: "Unable to generate this learning block.",
@@ -133,6 +134,7 @@ export async function POST(request: Request) {
     if (error instanceof RequestAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
+    console.error("[api/study/learn-item] Unhandled error:", error);
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 }

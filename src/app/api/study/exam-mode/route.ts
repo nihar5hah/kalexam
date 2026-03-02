@@ -61,6 +61,7 @@ export async function POST(request: Request) {
     if (error instanceof RequestAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
+    console.error("[api/study/exam-mode] Unhandled error:", error);
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 }
