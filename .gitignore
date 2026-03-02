@@ -46,3 +46,7 @@ public/globe.svg
 public/next.svg
 public/vercel.svg
 public/window.svg
+
+# AI tooling — GSD (Get Shit Done) plugin and OpenCode
+.planning/
+.opencode/
