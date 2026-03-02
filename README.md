@@ -1,115 +1,178 @@
 # KalExam
 
-> **AI-Powered Exam Preparation** — Intelligent study tracking, adaptive learning pathways, and real-time readiness scoring.
+> **AI-Powered Last-Minute Exam Prep** — Upload your syllabus, get a personalized study strategy, and walk into your exam ready.
 
 [![Next.js](https://img.shields.io/badge/Next.js-16.1-black?style=flat-square&logo=next.js)](https://nextjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org)
 [![Firebase](https://img.shields.io/badge/Firebase-Latest-orange?style=flat-square&logo=firebase)](https://firebase.google.com)
+[![Gemini AI](https://img.shields.io/badge/Gemini_AI-2.0-purple?style=flat-square&logo=google)](https://ai.google.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](./LICENSE)
 
 ---
 
-## 🚀 Overview
-
-**KalExam** transforms how students prepare for exams by combining intelligent content analysis with real-time progress intelligence. Upload your study materials (PDFs, Word docs, PowerPoints), get an AI-generated strategy, and let the platform guide you through personalized exam prep with live readiness scoring.
-
-### Key Capabilities
-
-- 📊 **Intelligent Strategy Generation**: AI analyzes your syllabus and study materials to create prioritized learning pathways
-- 🎯 **Exam Mode Readiness**: Real-time scoring (0–100) with likely questions and weak area identification
-- 💬 **Smart Chat Learning**: Contextual Q&A with cached responses to avoid redundant AI calls
-- 📈 **Live Progress Tracking**: Per-topic learning status, time spent, and confidence scoring
-- 🔥 **Next-Topic Recommendations**: Adaptive algorithms blend exam likelihood, priority, and time constraints
-- 📄 **Strategy Report Export**: Download multi-page PDF reports with progress summaries
-- ✍️ **Text + File Input**: Enter syllabus text manually or upload parsed documents
+![KalExam Landing Page](./docs/images/landing.png)
 
 ---
 
-## 🏗️ Architecture Highlights
+## What is KalExam?
 
-### Async Job Orchestration
-Strategy generation runs as a multi-stage pipeline with immediate return and long-polling updates:
-- **Stages**: Queued → Extracting → Analyzing → Generating → Preparing → Complete
-- **No blocking**: Client polls `/api/generate-strategy/jobs` while precomputing top 3 recommended topics
+**KalExam** ("Kal" means "tomorrow" in Hindi — as in, *exam kal hai*) is a full-stack AI application that helps students prepare for exams intelligently, especially under time pressure.
 
-### Session-Level Intelligence
-- `TopicProgress` model tracks learning status, time spent, and confidence per topic
-- Auto-marks topics as "learning" on first open, "completed" on finish
-- Session caching prevents redundant LLM calls for identical queries
-
-### Smart Recommendation Scoring
-Six-factor algorithm for next-topic suggestions:
-- Exam likelihood (0–100) + Chapter weightage (0–100)
-- Unfinished bonus (18) + Priority score (10–35) + Time remaining factor (4–20)
-
-### Exam Mode (Readiness 0–100)
-- Generates 3 likely questions + weak areas + exam tip
-- Adjusts readiness based on retrieval confidence (high +8, medium +3, low -5)
-- Per-topic caching with model signature invalidation
+Students upload their syllabus and study materials — PDFs, Word docs, PowerPoints, YouTube lecture links, or raw URLs — and KalExam generates a prioritized study strategy using an AI pipeline. The platform then provides a rich, interactive study interface: streamed explanations, contextual Q&A, micro-quizzes, and a live exam readiness score.
 
 ---
 
-## 📦 Tech Stack
+## Screenshots
+
+| Landing | Upload |
+|---|---|
+| ![Landing Page](./docs/images/landing.png) | ![Upload Page](./docs/images/upload.png) |
+
+| Dashboard | Study Interface |
+|---|---|
+| ![Dashboard](./docs/images/dashboard.png) | ![Study Interface](./docs/images/study.png) |
+
+---
+
+## Features
+
+### Strategy Generation
+Upload your syllabus and study materials and KalExam runs a multi-stage AI pipeline to extract chapters, score each topic by exam likelihood, and produce a prioritized learning plan. The job runs asynchronously — no waiting on a loading screen. The client polls for progress while the server precomputes the top recommended topics in the background.
+
+**Supported input formats:** PDF, DOCX, PPT/PPTX, YouTube URLs (with transcript fetch + AI reconstruction fallback), website URLs, plain text.
+
+### Interactive Study Interface
+Each topic has its own dedicated study page with:
+
+- **Learn Now cards** — streamed explanations with concept, worked example, exam tip, and a typical exam question for each learning item
+- **Micro-quizzes** — per-item quizzes at easy / medium / hard difficulty, generated on demand
+- **Quick actions** — one-click prompts: *What's the difference?*, *Give me an example*, *Likely exam question*, *Explain simply*
+- **Exam Mode** — generates 3 likely exam questions + a readiness score (0–100) + weak areas + a revision tip
+- **Chat panel** — multi-turn contextual Q&A against the student's own study materials, streamed via SSE, with per-question response caching
+
+### Smart Recommendations
+A six-factor scoring algorithm determines what to study next:
+- Exam likelihood score (from AI analysis)
+- Chapter weightage
+- Unfinished topic bonus
+- Priority tier (critical / high / medium / low)
+- Time-remaining factor
+- Completion status
+
+### RAG Pipeline
+All AI answers are grounded in the student's actual study materials, not just general knowledge. The retrieval pipeline uses BM25-style token scoring with source-type priority boosts (Previous Papers > Question Banks > Study Materials > Syllabus). Supports query expansion via Gemini for better recall.
+
+### Source Management
+Students can add or remove sources at any time from the study interface — YouTube videos, website URLs, or text snippets. Each source is chunked and indexed into Firestore. Toggling sources invalidates the relevant caches and updates the RAG index live.
+
+### Dashboard Intelligence
+The dashboard shows a real-time intel panel per study session:
+- Exam countdown
+- Overall completion percentage
+- Current readiness score
+- Weakest chapter at a glance
+- Today's recommended focus topic
+- Readiness trend sparkline
+
+### PDF Report Export
+Download a multi-page PDF strategy report including chapter summaries, topic weightage, material coverage, and progress badges (not started / learning / completed).
+
+### Account & Preferences
+- Email/password and Google OAuth sign-in
+- User settings: display name, password change, default model, default study hours
+- Per-user preferences persisted to Firestore
+
+---
+
+## Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
-| **Frontend** | Next.js 16.1, TypeScript, TailwindCSS, shadcn/ui |
-| **Backend** | Next.js API Routes, Node.js |
-| **Database** | Firestore (real-time progress, strategies, user sessions) |
-| **Auth** | Firebase Authentication (email/password, OAuth) |
-| **AI** | LLM integration (Gemini, OpenAI custom), RAG pipeline |
-| **File Parsing** | pdf-parse, docx-parser, pptx-parser |
-| **PDF Export** | jsPDF (client-side multi-page generation) |
-| **Async** | In-memory job state machine (production: Cloud Tasks) |
+|---|---|
+| Framework | Next.js 16.1 (App Router), React 19, TypeScript 5 |
+| Styling | TailwindCSS v4, shadcn/ui (Radix UI primitives) |
+| Animation | Framer Motion 12 |
+| Authentication | Firebase Auth (email/password + Google OAuth) |
+| Database | Firestore (client + Admin SDK) |
+| File Storage | Firebase Storage |
+| AI — Primary | Google Gemini (2.0 Flash, 2.5 Pro Preview) |
+| AI — Secondary | Custom OpenAI-compatible endpoint (bring your own) |
+| AI Routing | Dual-model router: FAST for simple tasks, SMART for complex ones |
+| Streaming | Server-Sent Events (SSE) for chat and Learn Now cards |
+| File Parsing | pdf-parse, mammoth (DOCX), custom PPT/PPTX parser |
+| YouTube | youtube-transcript + AI reconstruction fallback |
+| URL Ingestion | Custom HTML stripper and chunker |
+| PDF Export | jsPDF (client-side, multi-page) |
+| Markdown | react-markdown + remark-gfm |
+| List Virtualization | react-window |
 
 ---
 
-## 🚄 Getting Started
+## Architecture
+
+### Async Strategy Pipeline
+Strategy generation does not block the UI. The server creates a job record and immediately returns a job ID. A background worker runs through five stages — `extracting_text → analyzing_chapters → generating_strategy → preparing_study_content → complete` — while the client polls for status. Top recommended topics are precomputed during the preparation stage so the study interface loads instantly.
+
+### Dual-Model AI Router
+Every AI call is routed through a model selector that picks between a FAST model (Gemini Flash) and a SMART model (Gemini Pro). The router auto-upgrades to the SMART model if the fast model returns output that is too short, too generic, or fails JSON schema validation.
+
+### Multi-Layer Caching
+- **Study content cache**: per-topic, keyed by a cryptographic signature of the source file URLs and model version. Invalidated automatically when sources change.
+- **Chat cache**: per-question, per-model, stored in the study session document.
+- **YouTube transcript cache**: reconstructed transcripts stored in a global Firestore collection, keyed by video ID and model.
+- **Fallback detection**: low-quality AI responses are detected and not cached, triggering a SMART model retry.
+
+### RAG Retrieval
+Chunks are stored in Firestore with token-overlap metadata. At query time, BM25-style scoring ranks chunks, source-type priority boosts are applied, and diversity constraints ensure results span multiple source types (e.g., not all chunks from the same file). Query expansion is available via a secondary Gemini call.
+
+---
+
+## Getting Started
 
 ### Prerequisites
 - Node.js 18+
-- Firebase project with Firestore enabled
-- API keys for LLM providers (Gemini, OpenAI, or custom)
+- A Firebase project with Firestore, Authentication, and Storage enabled
+- A Google Gemini API key (or a custom OpenAI-compatible endpoint)
 
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/nihar5hah/kalexam.git
 cd kalexam
-
-# Install dependencies
 npm install
-
-# Configure environment variables
 cp .env.example .env.local
 ```
 
-### Environment Setup
+### Environment Variables
 
-**Frontend** (`.env.local`):
+Edit `.env.local` with your credentials:
+
 ```
-NEXT_PUBLIC_FIREBASE_API_KEY=...
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=...
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=...
-# Additional Firebase config
+# Firebase (client-side)
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
 
-# Server-side Admin SDK (needed for RAG / indexed-chunk reads)
-FIREBASE_SERVICE_ACCOUNT_KEY={...}  # Full JSON service-account key, OR:
-FIREBASE_CLIENT_EMAIL=...           # service-account email
-FIREBASE_PRIVATE_KEY=...            # PEM private key (newlines as \n)
-FIREBASE_PROJECT_ID=...             # can also fall back to NEXT_PUBLIC_FIREBASE_PROJECT_ID
+# Firebase Admin SDK (server-side, for RAG chunk reads)
+FIREBASE_SERVICE_ACCOUNT_KEY=   # Full JSON as a single string, OR use the three fields below:
+FIREBASE_CLIENT_EMAIL=
+FIREBASE_PRIVATE_KEY=
+FIREBASE_PROJECT_ID=
+
+# AI Provider
+GEMINI_API_KEY=
 ```
 
-### Local Development
+### Run Locally
 
 ```bash
 npm run dev
-
 # Runs on http://localhost:3000
 ```
 
-### Build & Deploy
+### Build
 
 ```bash
 npm run build
@@ -117,229 +180,81 @@ npm run build
 
 ---
 
-## 📚 Core Features
+## Project Structure
 
-### 1. Strategy Generation
-Upload syllabus + study materials → AI analyzes chapters, topics, weightage → generates prioritized learning plan
-
-```bash
-POST /api/generate-strategy/jobs
-{
-  "syllabusFiles": [...],  // optional PDFs, DOCXs
-  "syllabusTextInput": "...",  // optional manual text
-  "studyMaterialFiles": [...]  // PDFs, DOCXs, PPTXs
-}
 ```
-
-### 2. Study Interface
-Interactive topic page with:
-- Contextual learning materials
-- Chat Q&A (with caching)
-- Completion tracking
-- Auto-recommended next topic
-
-```bash
-GET /api/study/[topic]
-POST /api/study/ask  // With cache invalidation
-POST /api/study/exam-mode  // Get readiness score
-```
-
-### 3. Exam Mode
-Test readiness before the actual exam:
-- 3 likely questions generated from weak areas
-- Real-time readiness score (0–100)
-- Topic-level confidence scoring
-- Exam preparation tips
-
-### 4. Progress Intelligence
-Every session tracks:
-- Topics learned / completed / remaining
-- Average time per topic
-- Confidence scores (high/medium/low)
-- Persistent session state across sessions
-
-### 5. PDF Report Export
-Download strategy as multi-page PDF including:
-- Chapter summaries with weightage
-- Material coverage per topic
-- Progress badges (not started / learning / completed)
-- Study recommendations
-
----
-
-## 🔧 API Reference
-
-### Generate Strategy
-```http
-POST /api/generate-strategy/jobs
-Content-Type: application/json
-
-{
-  "syllabusFiles": ["file_id_1"],
-  "syllabusTextInput": "Introduction to Chemistry...",
-  "studyMaterialFiles": ["file_id_2"],
-  "modelConfig": {
-    "provider": "gemini",
-    "model": "gemini-2.0-flash",
-    "temperature": 0.7
-  }
-}
-```
-
-**Response**:
-```json
-{
-  "jobId": "job_abc123",
-  "status": "queued"
-}
-```
-
-### Poll Job Status
-```http
-GET /api/generate-strategy/jobs?id=job_abc123
-```
-
-**Response** (when complete):
-```json
-{
-  "status": "complete",
-  "result": {
-    "chapters": [...],
-    "topics": [...],
-    "estimatedHours": 40
-  }
-}
-```
-
-### Chat with Context
-```http
-POST /api/study/ask
-{
-  "topic": "Organic Chemistry",
-  "question": "What is a benzene ring?",
-  "strategyId": "strategy_xyz"
-}
-```
-
-### Get Exam Readiness
-```http
-POST /api/study/exam-mode
-{
-  "topic": "Organic Chemistry",
-  "files": ["file_id_1"],
-  "modelConfig": { ... }
-}
-```
-
-**Response**:
-```json
-{
-  "readinessScore": 72,
-  "likelyQuestions": [
-    "Define resonance in benzene...",
-    ...
-  ],
-  "weakAreas": ["Substitution reactions"],
-  "examTip": "Focus on mechanism steps..."
-}
+src/
+├── app/
+│   ├── page.tsx                  # Landing page
+│   ├── auth/page.tsx             # Sign in / Sign up
+│   ├── upload/page.tsx           # Strategy generation form
+│   ├── dashboard/page.tsx        # Session list + intel panel
+│   ├── study/[topic]/page.tsx    # Per-topic study interface
+│   ├── settings/page.tsx         # Account settings
+│   └── api/
+│       ├── generate-strategy/    # Strategy job creation + polling
+│       └── study/                # Chat, exam mode, learn items, quizzes
+├── components/
+│   ├── study/                    # Study page sub-components
+│   ├── dashboard/                # Dashboard sub-components
+│   └── ui/                       # shadcn + custom primitives
+└── lib/
+    ├── ai/                       # AI client, model router, strategy orchestrator
+    ├── firestore/                # All Firestore read/write logic
+    ├── parsing/                  # File parsers + chunker
+    └── study/                    # RAG pipeline, exam likelihood, caching
 ```
 
 ---
 
-## 📊 Database Schema
+## API Overview
 
-### Firestore Collections
-
-**`strategies/{strategyId}`**
-- `chapters[]`: extracted from syllabus
-- `topics[]`: generated topics with likelihood scores
-- `createdAt`, `updatedAt`
-- `userId`: user who created it
-
-**`users/{uid}/studySessions/{sessionId}`**
-- `strategyId`: associated strategy
-- `topicProgress{}`: per-topic learning state
-  - `status`: "not_started" | "learning" | "completed"
-  - `timeSpent`: minutes
-  - `confidenceScore`: 0–100
-  - `lastOpenedAt`: timestamp
-- `studyContent{}` (cache): generated summaries per topic
-- `chatCache{}` (cache): Q&A responses with signature validation
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/generate-strategy/jobs` | Start a strategy generation job |
+| `GET` | `/api/generate-strategy/jobs?id=` | Poll job status |
+| `GET` | `/api/generate-strategy/jobs/recover` | Recover a stuck job |
+| `POST` | `/api/sources/index` | Index a new source into the RAG store |
+| `POST` | `/api/study/topic` | Get AI-generated study content for a topic |
+| `POST` | `/api/study/ask` | Chat Q&A (streaming) |
+| `POST` | `/api/study/exam-mode` | Get readiness score + likely questions |
+| `POST` | `/api/study/learn-item` | Deep-dive explanation for a learning item (streaming) |
+| `POST` | `/api/study/micro-quiz` | Generate a quiz question for a learning item |
 
 ---
 
-## 🎯 Roadmap
+## Roadmap
 
-### Phase 5: Production Readiness
-- [ ] Migrate in-memory job store → Firestore + Cloud Tasks
-- [ ] Dashboard analytics (exam countdown, high-risk topics, completion %)
+### In Progress
+- [ ] Cloud Tasks integration to replace in-memory job store for production scalability
 - [ ] Enhanced PDF reports (student name, exam date, generated timestamp)
-- [ ] Persistent session recovery
+- [ ] Persistent session recovery across page refreshes
 
-### Phase 6: Advanced Intelligence
+### Planned
 - [ ] Spaced repetition scheduling
 - [ ] Personalized mock exams
-- [ ] Peer comparison (anonymized benchmarking)
-- [ ] Study group collaboration
-
-### Phase 7: Mobile & Offline
-- [ ] React Native mobile app
+- [ ] Mobile app (React Native)
 - [ ] Offline study mode
-- [ ] Push notifications for study reminders
 
 ---
 
-## 🔒 Security & Privacy
+## Security
 
-- **Auth**: Firebase Authentication with UID-based access control
-- **Data**: All student data in Firestore with user-scoped security rules
-- **Files**: Uploaded materials stored in Firebase Storage with automatic cleanup
-- **Models**: API keys stored in secure environment variables
-- **Caching**: Session-level cache with cryptographic signature validation
-
----
-
-## 📄 License
-
-This project is licensed under the [MIT License](./LICENSE).
+- All authenticated routes are protected server-side via Firebase Admin SDK token verification
+- Firestore security rules scope all data reads and writes to the authenticated user's UID
+- Uploaded files are stored in Firebase Storage with per-user path isolation
+- API keys are stored exclusively in server-side environment variables and never exposed to the client
+- AI response caches are keyed with cryptographic file signatures to prevent stale data from being served after source updates
 
 ---
 
-## 🤝 Contributing
+## License
 
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Development Guidelines
-- Write TypeScript for all new code
-- Add tests for new features
-- Follow ESLint + Prettier conventions
-- Update README for API changes
+[MIT](./LICENSE)
 
 ---
 
-## 💬 Support
+## Author
 
-- **Issues**: [Open a GitHub issue](https://github.com/nihar5hah/KalExam/issues) for bugs or feature requests
-
----
-
-## 👨‍💻 Authors
-
-**Nihar Shah** — Full-stack AI engineer  
-GitHub: [@nihar5hah](https://github.com/nihar5hah)
-
----
-
-## ⭐ Show Your Support
-
-If KalExam helped you ace your exams, please give this repo a ⭐! It helps others discover the project.
-
----
-
-**Built with ❤️ for students everywhere. Ace your exams with intelligence.**
+**Nihar Shah**  
+[github.com/nihar5hah](https://github.com/nihar5hah)
