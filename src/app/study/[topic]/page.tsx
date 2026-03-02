@@ -1185,6 +1185,8 @@ function StudyTopicContent({ topicSlug }: { topicSlug: string }) {
         }
 
         try {
+          const youtubeChunkSourceIds = [...new Set(payload.chunks.filter((c) => payload.sources.find((s) => s.id === c.sourceId && s.type === "youtube")).map((c) => c.sourceId))];
+          console.log("[YouTube-RAG-Verify] appendIndexedChunks sourceIds:", youtubeChunkSourceIds, "totalChunks:", payload.chunks.length);
           await appendIndexedChunks(
             user.uid,
             strategyId,
