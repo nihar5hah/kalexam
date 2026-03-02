@@ -243,18 +243,36 @@ export async function appendIndexedChunks(
 
   const db = getFirebaseDb();
   const activeVersion = await getActiveChunkVersion(uid, strategyId);
+  console.log("[YouTube-RAG-Verify] appendIndexedChunks start", {
+    uid,
+    strategyId,
+    activeVersion,
+    chunkCount: chunks.length,
+    sourceIds: [...new Set(chunks.map((c) => c.sourceId))],
+  });
   const chunkCollection = indexedChunkCollection(uid, strategyId);
   const BATCH_LIMIT = 400;
-  for (let index = 0; index < chunks.length; index += BATCH_LIMIT) {
-    const batch = writeBatch(db);
-    const slice = chunks.slice(index, index + BATCH_LIMIT);
-    for (const chunk of slice) {
-      if (typeof activeVersion === "number") {
-        batch.set(doc(chunkCollection), { ...chunk, _v: activeVersion } satisfies IndexedChunkStored);
-      } else {
-        batch.set(doc(chunkCollection), chunk);
+  try {
+    for (let index = 0; index < chunks.length; index += BATCH_LIMIT) {
+      const batch = writeBatch(db);
+      const slice = chunks.slice(index, index + BATCH_LIMIT);
+      for (const chunk of slice) {
+        if (typeof activeVersion === "number") {
+          batch.set(doc(chunkCollection), { ...chunk, _v: activeVersion } satisfies IndexedChunkStored);
+        } else {
+          batch.set(doc(chunkCollection), chunk);
+        }
       }
+      await batch.commit();
+      console.log("[YouTube-RAG-Verify] appendIndexedChunks batch committed", { batchIndex: index, batchSize: slice.length });
     }
-    await batch.commit();
+    console.log("[YouTube-RAG-Verify] appendIndexedChunks complete", { chunkCount: chunks.length });
+  } catch (error) {
+    console.error("[YouTube-RAG-Verify] appendIndexedChunks FAILED", {
+      uid,
+      strategyId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
 }
