@@ -2,7 +2,7 @@ import { YoutubeTranscript } from "youtube-transcript";
 
 import { FAST_MODEL } from "@/lib/ai/modelRouter";
 import { generateWithGeminiModel } from "@/lib/ai/providers/gemini";
-import { readYoutubeReconstructionCache, writeYoutubeReconstructionCache } from "@/lib/firestore/youtube-cache";
+import { readYoutubeReconstructionCacheAdmin, writeYoutubeReconstructionCacheAdmin } from "@/lib/firestore/youtube-cache-admin";
 import { splitIntoChunks } from "@/lib/parsing/chunker";
 import { ParsedSourceChunk } from "@/lib/parsing/types";
 
@@ -304,7 +304,7 @@ export async function ingestYouTubeTranscript(url: string): Promise<YouTubeInges
 
   const metadata = await fetchYouTubeMetadata(videoId);
   const cacheKey = FAST_MODEL;
-  const cached = await readYoutubeReconstructionCache(videoId, cacheKey);
+  const cached = await readYoutubeReconstructionCacheAdmin(videoId, cacheKey);
   if (cached?.chunks?.length) {
     return {
       videoId,
@@ -397,7 +397,7 @@ export async function ingestYouTubeTranscript(url: string): Promise<YouTubeInges
   }));
 
   if (transcriptSource === "ai-reconstructed") {
-    await writeYoutubeReconstructionCache(videoId, cacheKey, {
+    await writeYoutubeReconstructionCacheAdmin(videoId, cacheKey, {
       videoId,
       modelVersion: cacheKey,
       title: metadata.title,

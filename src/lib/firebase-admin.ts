@@ -19,7 +19,11 @@ function getAdminApp(): App {
     return cachedApp;
   }
 
-  const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+  // Accept both FIREBASE_SERVICE_ACCOUNT_KEY and FIREBASE_SERVICE_ACCOUNT_JSON
+  // (some deployment environments use the latter name).
+  const serviceAccountKey =
+    process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   const projectId =
     process.env.FIREBASE_PROJECT_ID ||
     process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
@@ -32,7 +36,7 @@ function getAdminApp(): App {
         private_key?: string;
       };
       if (!parsed.client_email || !parsed.private_key) {
-        throw new Error("FIREBASE_SERVICE_ACCOUNT_KEY is missing required fields");
+        throw new Error("Firebase service account JSON is missing required fields (client_email, private_key)");
       }
       cachedApp = initializeApp({
         credential: cert({
@@ -45,13 +49,13 @@ function getAdminApp(): App {
     } catch (error) {
       if (isProductionEnv()) {
         throw new Error(
-          `Invalid FIREBASE_SERVICE_ACCOUNT_KEY configuration: ${
+          `Invalid Firebase service account JSON: ${
             error instanceof Error ? error.message : "unknown error"
           }`,
         );
       }
 
-      console.warn("[firebase-admin] FIREBASE_SERVICE_ACCOUNT_KEY is invalid, falling back", {
+      console.warn("[firebase-admin] Firebase service account JSON is invalid, falling back", {
         message: error instanceof Error ? error.message : "unknown error",
       });
     }
