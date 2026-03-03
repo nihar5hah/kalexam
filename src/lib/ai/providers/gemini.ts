@@ -1,4 +1,6 @@
-const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-1.5-flash";
+import { GeminiGenerationOptions } from "@/lib/ai/types";
+
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.1-flash-lite-preview";
 
 type GeminiErrorCode = "missing_api_key" | "request_failed" | "empty_response";
 
@@ -10,11 +12,29 @@ function createGeminiError(code: GeminiErrorCode, message: string): Error & { co
 }
 
 export async function generateWithGeminiModel(prompt: string, modelName: string): Promise<string> {
+  return generateWithGeminiModelWithOptions(prompt, modelName);
+}
+
+function toThinkingLevel(level?: GeminiGenerationOptions["thinkingLevel"]): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | undefined {
+  if (level === "minimal") return "MINIMAL";
+  if (level === "low") return "LOW";
+  if (level === "medium") return "MEDIUM";
+  if (level === "high") return "HIGH";
+  return undefined;
+}
+
+export async function generateWithGeminiModelWithOptions(
+  prompt: string,
+  modelName: string,
+  options?: GeminiGenerationOptions,
+): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
     throw createGeminiError("missing_api_key", "Missing GEMINI_API_KEY");
   }
+
+  const thinkingLevel = toThinkingLevel(options?.thinkingLevel);
 
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
@@ -23,6 +43,15 @@ export async function generateWithGeminiModel(prompt: string, modelName: string)
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
+        ...(thinkingLevel
+          ? {
+              generationConfig: {
+                thinkingConfig: {
+                  thinkingLevel,
+                },
+              },
+            }
+          : {}),
       }),
     }
   );
@@ -67,11 +96,22 @@ export async function generateWithGeminiModelStream(
   modelName: string,
   onDelta: (chunk: string) => void,
 ): Promise<string> {
+  return generateWithGeminiModelStreamWithOptions(prompt, modelName, onDelta);
+}
+
+export async function generateWithGeminiModelStreamWithOptions(
+  prompt: string,
+  modelName: string,
+  onDelta: (chunk: string) => void,
+  options?: GeminiGenerationOptions,
+): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
     throw createGeminiError("missing_api_key", "Missing GEMINI_API_KEY");
   }
+
+  const thinkingLevel = toThinkingLevel(options?.thinkingLevel);
 
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${apiKey}`,
@@ -80,6 +120,15 @@ export async function generateWithGeminiModelStream(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
+        ...(thinkingLevel
+          ? {
+              generationConfig: {
+                thinkingConfig: {
+                  thinkingLevel,
+                },
+              },
+            }
+          : {}),
       }),
     },
   );

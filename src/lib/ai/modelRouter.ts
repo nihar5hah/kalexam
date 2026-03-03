@@ -1,11 +1,11 @@
-import { ModelConfig } from "@/lib/ai/types";
+import { GeminiGenerationOptions, ModelConfig } from "@/lib/ai/types";
 import { generateWithCustomProvider } from "@/lib/ai/providers/custom";
 import { generateWithCustomProviderStream } from "@/lib/ai/providers/custom";
-import { generateWithGeminiModel } from "@/lib/ai/providers/gemini";
-import { generateWithGeminiModelStream } from "@/lib/ai/providers/gemini";
+import { generateWithGeminiModelStreamWithOptions } from "@/lib/ai/providers/gemini";
+import { generateWithGeminiModelWithOptions } from "@/lib/ai/providers/gemini";
 
 export const SMART_MODEL = "gemini-3.1-pro-preview";
-export const FAST_MODEL = "gemini-3-flash-preview";
+export const FAST_MODEL = "gemini-3.1-flash-lite-preview";
 
 export type AiTaskType =
   | "strategy_generation"
@@ -74,13 +74,7 @@ class ModelRouterGenerationError extends Error {
   }
 }
 
-const SMART_TASKS = new Set<AiTaskType>([
-  "chapter_prioritization",
-  "exam_readiness_scoring",
-  "crash_course_generation",
-  "topic_ranking",
-  "adaptive_path",
-]);
+const SMART_TASKS = new Set<AiTaskType>(["adaptive_path"]);
 
 const FAST_FIRST_TASKS = new Set<AiTaskType>(["strategy_generation"]);
 
@@ -89,10 +83,31 @@ export function routeModel(taskType: AiTaskType, complexityScore = 0): typeof FA
     return FAST_MODEL;
   }
 
-  if (SMART_TASKS.has(taskType) || complexityScore >= 0.9) {
+  if (SMART_TASKS.has(taskType) || complexityScore >= 0.92) {
     return SMART_MODEL;
   }
   return FAST_MODEL;
+}
+
+function getThinkingLevel(taskType: AiTaskType, complexityScore = 0): GeminiGenerationOptions["thinkingLevel"] {
+  if (complexityScore >= 0.8) {
+    return "medium";
+  }
+
+  if (
+    taskType === "strategy_generation" ||
+    taskType === "exam_mode_generation" ||
+    taskType === "chapter_prioritization" ||
+    taskType === "topic_ranking"
+  ) {
+    return "low";
+  }
+
+  if (complexityScore >= 0.45) {
+    return "low";
+  }
+
+  return "minimal";
 }
 
 function parseJsonCandidate(raw: string): boolean {
@@ -165,13 +180,18 @@ function classifyProviderError(error: unknown): ProviderErrorCode {
   return "unknown_provider_error";
 }
 
-async function runWithModel(prompt: string, modelConfig: ModelConfig, modelName: string): Promise<string> {
+async function runWithModel(
+  prompt: string,
+  modelConfig: ModelConfig,
+  modelName: string,
+  options?: GeminiGenerationOptions,
+): Promise<string> {
   try {
     if (modelConfig.modelType === "custom") {
       return await generateWithCustomProvider(prompt, modelConfig.config);
     }
 
-    return await generateWithGeminiModel(prompt, modelName);
+    return await generateWithGeminiModelWithOptions(prompt, modelName, options);
   } catch (error) {
     const code = classifyProviderError(error);
     const message = error instanceof Error ? error.message : "Unknown provider error";
@@ -184,13 +204,14 @@ async function runWithModelStream(
   modelConfig: ModelConfig,
   modelName: string,
   onDelta: DeltaHandler,
+  options?: GeminiGenerationOptions,
 ): Promise<string> {
   try {
     if (modelConfig.modelType === "custom") {
       return await generateWithCustomProviderStream(prompt, modelConfig.config, onDelta);
     }
 
-    return await generateWithGeminiModelStream(prompt, modelName, onDelta);
+    return await generateWithGeminiModelStreamWithOptions(prompt, modelName, onDelta, options);
   } catch (error) {
     const code = classifyProviderError(error);
     const message = error instanceof Error ? error.message : "Unknown provider error";
@@ -217,11 +238,14 @@ export async function generateWithModelRouter(
   }
 
   const primaryModel = routeModel(input.taskType, input.complexityScore);
+  const primaryThinking = getThinkingLevel(input.taskType, input.complexityScore);
   let primary = "";
   let primaryErrorCode: ProviderErrorCode | null = null;
 
   try {
-    primary = await runWithModel(input.prompt, input.modelConfig, primaryModel);
+    primary = await runWithModel(input.prompt, input.modelConfig, primaryModel, {
+      thinkingLevel: primaryThinking,
+    });
   } catch (error) {
     primaryErrorCode = classifyProviderError(error);
   }
@@ -246,7 +270,9 @@ export async function generateWithModelRouter(
   }
 
   if (!primary) {
-    const upgradedAfterPrimaryError = await runWithModel(input.prompt, input.modelConfig, SMART_MODEL);
+    const upgradedAfterPrimaryError = await runWithModel(input.prompt, input.modelConfig, SMART_MODEL, {
+      thinkingLevel: "high",
+    });
     return {
       text: upgradedAfterPrimaryError,
       meta: {
@@ -272,7 +298,9 @@ export async function generateWithModelRouter(
     };
   }
 
-  const upgraded = await runWithModel(input.prompt, input.modelConfig, SMART_MODEL);
+  const upgraded = await runWithModel(input.prompt, input.modelConfig, SMART_MODEL, {
+    thinkingLevel: "high",
+  });
 
   return {
     text: upgraded,
@@ -306,9 +334,12 @@ export async function generateWithModelRouterStream(
   }
 
   const primaryModel = routeModel(input.taskType, input.complexityScore);
+  const primaryThinking = getThinkingLevel(input.taskType, input.complexityScore);
 
   try {
-    const text = await runWithModelStream(input.prompt, input.modelConfig, primaryModel, onDelta);
+    const text = await runWithModelStream(input.prompt, input.modelConfig, primaryModel, onDelta, {
+      thinkingLevel: primaryThinking,
+    });
     return {
       text,
       meta: {
@@ -327,7 +358,9 @@ export async function generateWithModelRouterStream(
       );
     }
 
-    const upgraded = await runWithModelStream(input.prompt, input.modelConfig, SMART_MODEL, onDelta);
+    const upgraded = await runWithModelStream(input.prompt, input.modelConfig, SMART_MODEL, onDelta, {
+      thinkingLevel: "high",
+    });
     return {
       text: upgraded,
       meta: {

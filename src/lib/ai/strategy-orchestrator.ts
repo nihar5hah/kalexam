@@ -268,7 +268,7 @@ async function runStrategyPipeline(jobId: string) {
     const chapterHints = extractSyllabusChapters(mergedSyllabusText, parsed.materialText);
 
     await updateJob(jobDoc.userId, jobId, { stage: "analyzing_chapters", progress: 62, status: "running" });
-    const modelLabel = getModelLabel(body);
+    const configuredModelLabel = getModelLabel(body);
 
     await updateJob(jobDoc.userId, jobId, { stage: "generating_strategy", progress: 78, status: "running" });
     const strategy = await withTimeout(
@@ -292,7 +292,8 @@ async function runStrategyPipeline(jobId: string) {
       "Strategy generation timed out. Please try again.",
     );
 
-    const normalized = normalizeStrategyResult(strategy, body.hoursLeft, modelLabel);
+    const routedModelLabel = strategy.modelUsed?.trim() || configuredModelLabel;
+    const normalized = normalizeStrategyResult(strategy, body.hoursLeft, routedModelLabel);
 
     await updateJob(jobDoc.userId, jobId, { stage: "preparing_study_content", progress: 90, status: "running" });
     const chapterMapped = mapWithChapterHints(normalized, chapterHints, parsed.previousPaperText, allFiles);
@@ -303,7 +304,7 @@ async function runStrategyPipeline(jobId: string) {
       progress: 100,
       result: {
         ...chapterMapped,
-        modelUsed: modelLabel,
+        modelUsed: routedModelLabel,
       },
     });
   } catch (error) {

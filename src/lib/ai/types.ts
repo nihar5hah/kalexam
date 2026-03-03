@@ -556,6 +556,12 @@ export type CustomProviderConfig = {
   modelName: string;
 };
 
+export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+export type GeminiGenerationOptions = {
+  thinkingLevel?: GeminiThinkingLevel;
+};
+
 export type ModelConfig =
   | {
       modelType: "gemini";
