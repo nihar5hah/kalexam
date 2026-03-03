@@ -7,7 +7,7 @@
 
 import { getAdminFirestore } from "@/lib/firebase-admin";
 import { ParsedSourceChunk } from "@/lib/parsing/types";
-import { StudySourceType } from "@/lib/firestore/sources";
+import type { StudySourceType } from "@/lib/firestore/sources";
 
 export type IndexedChunk = ParsedSourceChunk & {
   sourceId: string;

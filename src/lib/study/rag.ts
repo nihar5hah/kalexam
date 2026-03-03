@@ -19,7 +19,7 @@ import { parseUploadedFiles } from "@/lib/parsing";
 import { ParsedSourceChunk } from "@/lib/parsing/types";
 import { computeExamLikelihood, examLikelihoodLabel } from "@/lib/study/exam-likelihood";
 import { FALLBACK_MESSAGE } from "@/lib/study/constants";
-import { StudySourceType } from "@/lib/firestore/sources";
+import type { StudySourceType } from "@/lib/firestore/sources";
 
 const STOP_WORDS = new Set([
   "the",
