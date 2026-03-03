@@ -365,6 +365,10 @@ export function UploadForm() {
 
       const createdJob = (await jobResponse.json()) as CreateStrategyJobApiResponse;
       let data: GenerateStrategyApiResponse | null = null;
+      let lastMovementAt = Date.now();
+      let previousStage: StrategyJobStage | null = null;
+      let previousProgress = -1;
+      let previousUpdatedAt = -1;
 
       for (let attempt = 0; attempt < 180; attempt += 1) {
         const statusResponse = await fetch(
@@ -382,6 +386,21 @@ export function UploadForm() {
 
         const statusData = (await statusResponse.json()) as StrategyJobStatusApiResponse;
         const job = statusData.job;
+
+        if (
+          job.stage !== previousStage ||
+          job.progress !== previousProgress ||
+          job.updatedAt !== previousUpdatedAt
+        ) {
+          lastMovementAt = Date.now();
+          previousStage = job.stage;
+          previousProgress = job.progress;
+          previousUpdatedAt = job.updatedAt;
+        }
+
+        if (Date.now() - lastMovementAt > 90_000) {
+          throw new Error("Session generation stalled. Please retry.");
+        }
 
         setProgressStage(JOB_STAGE_TO_UI[job.stage]);
         const cappedProgress = Math.min(99, Math.max(35, job.progress));

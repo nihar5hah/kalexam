@@ -48,6 +48,24 @@ export type StrategyJobState = {
 const strategyJobRequests = new Map<string, StrategyPipelineRequest>();
 const strategyJobOwners = new Map<string, string>();
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
 function parseWeightage(weightage?: string): number {
   if (!weightage) {
     return 0;
@@ -253,21 +271,25 @@ async function runStrategyPipeline(jobId: string) {
     const modelLabel = getModelLabel(body);
 
     await updateJob(jobDoc.userId, jobId, { stage: "generating_strategy", progress: 78, status: "running" });
-    const strategy = await generateStrategy(
-      {
-        hoursLeft: body.hoursLeft,
-        extractedTexts: {
-          syllabusText: mergedSyllabusText,
-          materialText: parsed.materialText,
-          previousPaperText: parsed.previousPaperText,
+    const strategy = await withTimeout(
+      generateStrategy(
+        {
+          hoursLeft: body.hoursLeft,
+          extractedTexts: {
+            syllabusText: mergedSyllabusText,
+            materialText: parsed.materialText,
+            previousPaperText: parsed.previousPaperText,
+          },
+          examIntelligence: {
+            repeatedTopics: parsed.repeatedTopics,
+          },
+          chapterHints,
+          fileWarnings: parsed.warnings,
         },
-        examIntelligence: {
-          repeatedTopics: parsed.repeatedTopics,
-        },
-        chapterHints,
-        fileWarnings: parsed.warnings,
-      },
-      modelConfig
+        modelConfig
+      ),
+      90_000,
+      "Strategy generation timed out. Please try again.",
     );
 
     const normalized = normalizeStrategyResult(strategy, body.hoursLeft, modelLabel);
