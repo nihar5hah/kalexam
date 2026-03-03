@@ -75,7 +75,6 @@ class ModelRouterGenerationError extends Error {
 }
 
 const SMART_TASKS = new Set<AiTaskType>([
-  "strategy_generation",
   "chapter_prioritization",
   "exam_readiness_scoring",
   "crash_course_generation",
@@ -83,8 +82,14 @@ const SMART_TASKS = new Set<AiTaskType>([
   "adaptive_path",
 ]);
 
+const FAST_FIRST_TASKS = new Set<AiTaskType>(["strategy_generation"]);
+
 export function routeModel(taskType: AiTaskType, complexityScore = 0): typeof FAST_MODEL | typeof SMART_MODEL {
-  if (SMART_TASKS.has(taskType) || complexityScore >= 0.8) {
+  if (FAST_FIRST_TASKS.has(taskType) && complexityScore < 0.98) {
+    return FAST_MODEL;
+  }
+
+  if (SMART_TASKS.has(taskType) || complexityScore >= 0.9) {
     return SMART_MODEL;
   }
   return FAST_MODEL;

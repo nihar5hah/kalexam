@@ -288,7 +288,7 @@ async function runStrategyPipeline(jobId: string) {
         },
         modelConfig
       ),
-      90_000,
+      360_000,
       "Strategy generation timed out. Please try again.",
     );
 

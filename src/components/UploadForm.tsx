@@ -398,7 +398,7 @@ export function UploadForm() {
           previousUpdatedAt = job.updatedAt;
         }
 
-        if (Date.now() - lastMovementAt > 90_000) {
+        if (Date.now() - lastMovementAt > 390_000) {
           throw new Error("Session generation stalled. Please retry.");
         }
 

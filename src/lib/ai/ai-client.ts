@@ -7,7 +7,32 @@ import {
   normalizeStrategyResult,
 } from "@/lib/ai/types";
 
+function compactTextForPrompt(text: string, maxChars: number): string {
+  const normalized = text.trim();
+  if (!normalized) {
+    return "Not provided";
+  }
+
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+
+  const headChars = Math.floor(maxChars * 0.7);
+  const tailChars = maxChars - headChars;
+  const omitted = normalized.length - maxChars;
+
+  return [
+    normalized.slice(0, headChars),
+    `\n...[truncated ${omitted} characters for speed]...\n`,
+    normalized.slice(-tailChars),
+  ].join("");
+}
+
 function buildPrompt(input: GenerateStrategyInput): string {
+  const syllabusSnippet = compactTextForPrompt(input.extractedTexts.syllabusText || "", 9_000);
+  const materialSnippet = compactTextForPrompt(input.extractedTexts.materialText || "", 15_000);
+  const previousPaperSnippet = compactTextForPrompt(input.extractedTexts.previousPaperText || "", 7_000);
+
   const repeatedTopicsText = input.examIntelligence.repeatedTopics.length
     ? input.examIntelligence.repeatedTopics
         .map((topic) => `${topic.topic} (${topic.frequency})`)
@@ -36,10 +61,11 @@ function buildPrompt(input: GenerateStrategyInput): string {
     "modelUsed: string",
     "efficiencyScore: string",
     "",
+    "Use concise planning based on evidence. Do not include raw source excerpts in output.",
     `Hours left before exam: ${input.hoursLeft}`,
-    `Syllabus extracted text:\n${input.extractedTexts.syllabusText || "Not provided"}`,
-    `Study material extracted text:\n${input.extractedTexts.materialText || "Not provided"}`,
-    `Previous paper extracted text:\n${input.extractedTexts.previousPaperText || "Not provided"}`,
+    `Syllabus extracted text:\n${syllabusSnippet}`,
+    `Study material extracted text:\n${materialSnippet}`,
+    `Previous paper extracted text:\n${previousPaperSnippet}`,
     `Detected chapter hints:\n${chapterHintsText}`,
     `Repeated topics from previous papers: ${repeatedTopicsText}`,
     `Parser warnings: ${input.fileWarnings.join(" | ") || "None"}`,
@@ -180,10 +206,10 @@ export async function generateStrategy(
     prompt,
     taskType: "strategy_generation",
     modelConfig,
-    complexityScore: 0.95,
+    complexityScore: 0.45,
     qualitySignals: {
       requiresJson: true,
-      minChars: 300,
+      minChars: 180,
     },
   });
   try {
@@ -203,10 +229,10 @@ export async function generateStrategy(
       prompt: buildRepairPrompt(input, routed.text),
       taskType: "strategy_generation",
       modelConfig,
-      complexityScore: 0.95,
+      complexityScore: 0.6,
       qualitySignals: {
         requiresJson: true,
-        minChars: 300,
+        minChars: 180,
       },
     });
 
