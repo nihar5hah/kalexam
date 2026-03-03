@@ -9,7 +9,7 @@ env:
   - variable: GEMINI_API_KEY
     secret: GEMINI_API_KEY
 
-  - variable: FIREBASE_SERVICE_ACCOUNT_KEY
+  - variable: GCP_SERVICE_ACCOUNT
     secret: FIREBASE_SERVICE_ACCOUNT_KEY
 
   - variable: GEMINI_MODEL

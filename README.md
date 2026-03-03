@@ -156,7 +156,8 @@ NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
 NEXT_PUBLIC_FIREBASE_APP_ID=
 
 # Firebase Admin SDK (server-side, for RAG chunk reads)
-FIREBASE_SERVICE_ACCOUNT_KEY=   # Full JSON as a single string, OR use the three fields below:
+GCP_SERVICE_ACCOUNT=            # Preferred on Firebase App Hosting (full JSON as single string)
+FIREBASE_SERVICE_ACCOUNT_KEY=   # Also supported fallback name
 FIREBASE_CLIENT_EMAIL=
 FIREBASE_PRIVATE_KEY=
 FIREBASE_PROJECT_ID=

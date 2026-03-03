@@ -163,10 +163,10 @@ function classifyProviderError(error: unknown): ProviderErrorCode {
 async function runWithModel(prompt: string, modelConfig: ModelConfig, modelName: string): Promise<string> {
   try {
     if (modelConfig.modelType === "custom") {
-      return generateWithCustomProvider(prompt, modelConfig.config);
+      return await generateWithCustomProvider(prompt, modelConfig.config);
     }
 
-    return generateWithGeminiModel(prompt, modelName);
+    return await generateWithGeminiModel(prompt, modelName);
   } catch (error) {
     const code = classifyProviderError(error);
     const message = error instanceof Error ? error.message : "Unknown provider error";
@@ -182,10 +182,10 @@ async function runWithModelStream(
 ): Promise<string> {
   try {
     if (modelConfig.modelType === "custom") {
-      return generateWithCustomProviderStream(prompt, modelConfig.config, onDelta);
+      return await generateWithCustomProviderStream(prompt, modelConfig.config, onDelta);
     }
 
-    return generateWithGeminiModelStream(prompt, modelName, onDelta);
+    return await generateWithGeminiModelStream(prompt, modelName, onDelta);
   } catch (error) {
     const code = classifyProviderError(error);
     const message = error instanceof Error ? error.message : "Unknown provider error";

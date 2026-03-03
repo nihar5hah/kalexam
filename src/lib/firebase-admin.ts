@@ -23,9 +23,12 @@ function getAdminApp(): App {
   // FIREBASE_* prefixes are blocked by Cloud Functions, so GCP_SERVICE_ACCOUNT is used there.
   const serviceAccountKey =
     process.env.GCP_SERVICE_ACCOUNT ||
+    process.env.GCP_SERVICE_ACCOUNT_JSON ||
     process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   const projectId =
+    process.env.GCLOUD_PROJECT ||
+    process.env.GCP_PROJECT ||
     process.env.FIREBASE_PROJECT_ID ||
     process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
 
