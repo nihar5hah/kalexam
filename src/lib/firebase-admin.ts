@@ -19,9 +19,10 @@ function getAdminApp(): App {
     return cachedApp;
   }
 
-  // Accept both FIREBASE_SERVICE_ACCOUNT_KEY and FIREBASE_SERVICE_ACCOUNT_JSON
-  // (some deployment environments use the latter name).
+  // Accept multiple env var names for the service account JSON.
+  // FIREBASE_* prefixes are blocked by Cloud Functions, so GCP_SERVICE_ACCOUNT is used there.
   const serviceAccountKey =
+    process.env.GCP_SERVICE_ACCOUNT ||
     process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   const projectId =
